@@ -244,7 +244,7 @@ def select_dropdown_by_text(browser: CDPBrowser, selector: str, text: str) -> bo
         const el = document.querySelector('{escaped_sel}');
         if (!el) return false;
         for (const opt of el.options) {{
-            if (opt.text.toLowerCase().includes('{escaped_text.toLowerCase()}')) {{
+            if (opt.text.toLowerCase().includes('{escaped_text.lower()}')) {{
                 el.value = opt.value;
                 el.dispatchEvent(new Event('change', {{ bubbles: true }}));
                 return true;
