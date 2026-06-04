@@ -3,11 +3,11 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.11-blue.svg?style=flat-square" alt="Python Badge">
   <img src="https://img.shields.io/badge/code%20style-pep8-orange.svg?style=flat-square" alt="PEP8 Badge">
-  <img src="https://hits.dwyl.com/david96182/邮箱注册.svg?style=flat-square&show=unique&color=blue" alt="HitCount Badge">
-  <img src="https://img.shields.io/github/license/david96182/邮箱注册?style=flat-square" alt="GitHub License Badge">
+  <img src="https://hits.dwyl.com/xingluoyuankong/email-register.svg?style=flat-square&show=unique&color=blue" alt="HitCount Badge">
+  <img src="https://img.shields.io/github/license/xingluoyuankong/email-register?style=flat-square" alt="GitHub License Badge">
   <img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square&color=purple" alt="PRs Welcome Badge">
-  <img src="https://img.shields.io/github/actions/workflow/status/david96182/邮箱注册/ci.yml?style=flat-square&label=tests" alt="Test status">
-  <img src="https://img.shields.io/codecov/c/github/david96182/邮箱注册?style=flat-square" alt="Test coverage Badge">
+  <img src="https://img.shields.io/github/actions/workflow/status/xingluoyuankong/email-register/ci.yml?style=flat-square&label=tests" alt="Test status">
+  <img src="https://img.shields.io/codecov/c/github/xingluoyuankong/email-register?style=flat-square" alt="Test coverage Badge">
 </p>
 
 ------
@@ -35,7 +35,7 @@ To install 邮箱注册, you can follow these steps:
    Copy
 
    ```bash
-   git clone https://github.com/david96182/邮箱注册.git
+   git clone https://github.com/xingluoyuankong/email-register.git
    ```
 
 2. Change your current directory to the cloned repository:
@@ -358,4 +358,5 @@ To ensure responsible and lawful usage of 邮箱注册, please consider the foll
 2. Legal Compliance: You are solely responsible for ensuring that your use of 邮箱注册 is in full compliance with all applicable laws and regulations within your jurisdiction. Any misuse that violates the law is strictly discouraged.
 
 By choosing to use 邮箱注册, you acknowledge and accept the aforementioned disclaimers and agree to utilize this service only for educational and lawful purposes. Any misuse or illegal activities conducted using 邮箱注册 are entirely the responsibility of the user, and the developers and providers of 邮箱注册 bear no liability for such actions.
+
 
