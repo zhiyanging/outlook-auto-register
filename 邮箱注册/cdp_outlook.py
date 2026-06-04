@@ -28,7 +28,8 @@ try:
     from .cdp_browser import CDPBrowser, CDPLaunchConfig
     from .os_input import (
         os_click, os_long_press, os_type_text,
-        os_press_enter, os_press_tab,
+        os_press_enter, os_press_tab, os_press_escape,
+        os_dismiss_webauthn_dialog,
         browser_to_screen_coords, get_browser_window_position,
     )
     from .proxy_utils import parse_proxy, ProxyInfo
@@ -36,7 +37,8 @@ except ImportError:
     from cdp_browser import CDPBrowser, CDPLaunchConfig
     from os_input import (
         os_click, os_long_press, os_type_text,
-        os_press_enter, os_press_tab,
+        os_press_enter, os_press_tab, os_press_escape,
+        os_dismiss_webauthn_dialog,
         browser_to_screen_coords, get_browser_window_position,
     )
     from proxy_utils import parse_proxy, ProxyInfo
@@ -1469,19 +1471,14 @@ def _handle_post_challenge(browser: CDPBrowser, account: OutlookAccount) -> str:
             logger.info("[POST] passkey_prompt detected, dismissing Windows WebAuthn system dialog...")
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             # Windows 通行密钥弹窗是系统级弹窗（WebAuthn/Windows Hello），
-            # JS/CDP 完全看不到它，必须用 OS 级按键（SendInput）关闭
+            # JS/CDP 完全看不到它。必须用 Win32 API 查找弹窗窗口并发送关闭消息。
+            # 绝对不能盲目发 SendInput 按键，否则会发给 Chrome 导致关闭浏览器！
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # 1. 按 Escape 关闭系统弹窗（最常见有效）
-            os_press_escape()
-            time.sleep(0.5)
-            # 2. Tab 聚焦"取消"按钮 + Enter 点击（某些弹窗 Escape 不生效）
-            os_press_tab()
-            time.sleep(0.3)
-            os_press_enter()
-            time.sleep(0.5)
-            # 3. 再按 Escape 确保关闭
-            os_press_escape()
-            logger.info("[POST] OS-level Escape+Tab+Enter sent to dismiss WebAuthn dialog")
+            dismissed = os_dismiss_webauthn_dialog(timeout=5.0)
+            if dismissed:
+                logger.info("[POST] WebAuthn dialog dismissed via Win32 API")
+            else:
+                logger.warning("[POST] WebAuthn dialog dismiss failed or not found, continuing...")
             time.sleep(1)
             # 关闭系统弹窗后，再尝试点击网页上的"下一步"/"跳过"按钮
             clicked = browser.evaluate("""(() => { const btns = document.querySelectorAll('button,a,[role=button],input[type=submit]');
@@ -1505,16 +1502,13 @@ def _handle_post_challenge(browser: CDPBrowser, account: OutlookAccount) -> str:
         body_post = browser.get_body_text().lower()
         if any(kw in body_post for kw in ["选择保存通行密钥", "windows 安全中心", "windows security",
                                             "保存通行密钥的位置", "passkey setup"]):
-            logger.info("[POST] 检测到 Windows 安全中心通行密钥弹窗，发送 OS 级按键关闭...")
-            # 同上：系统级弹窗必须用 OS 按键关闭，JS evaluate 无法触及
-            os_press_escape()
-            time.sleep(0.5)
-            os_press_tab()
-            time.sleep(0.3)
-            os_press_enter()
-            time.sleep(0.5)
-            os_press_escape()
-            logger.info("[POST] OS-level Escape+Tab+Enter sent for Windows Security dialog")
+            logger.info("[POST] 检测到 Windows 安全中心通行密钥弹窗，用 Win32 API 关闭...")
+            # 同上：用 Win32 API 精准找到弹窗并发送关闭消息，不用 SendInput
+            dismissed = os_dismiss_webauthn_dialog(timeout=5.0)
+            if dismissed:
+                logger.info("[POST] Windows Security dialog dismissed via Win32 API")
+            else:
+                logger.warning("[POST] Windows Security dialog dismiss failed or not found, continuing...")
             time.sleep(1)
             # 关闭弹窗后，尝试点击网页上的按钮继续
             clicked = browser.evaluate("""(() => {

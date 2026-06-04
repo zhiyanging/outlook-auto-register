@@ -218,6 +218,154 @@ def os_press_escape():
         subprocess.run(["xdotool", "key", "Escape"], check=False)
 
 
+def os_dismiss_webauthn_dialog(timeout: float = 5.0) -> bool:
+    """
+    Dismiss the Windows WebAuthn / Passkey system dialog.
+    
+    The Windows WebAuthn dialog (triggered by navigator.credentials.create())
+    is a system-level modal that JS/CDP cannot interact with.
+    
+    Strategy:
+    1. Find the "Windows Security" / "Windows 安全中心" dialog window via Win32 API
+    2. Send WM_CLOSE or press Escape specifically to that window
+    3. If window not found, fall back to sending Escape to foreground window
+    
+    Returns True if dialog was found and dismissed, False otherwise.
+    """
+    if not IS_WINDOWS:
+        return False
+    
+    import ctypes.wintypes
+    
+    # Win32 API constants
+    WM_CLOSE = 0x0010
+    WM_KEYDOWN = 0x0100
+    WM_KEYUP = 0x0101
+    VK_ESCAPE = 0x1B
+    
+    user32 = ctypes.windll.user32
+    
+    # Callback for EnumWindows - find the WebAuthn dialog
+    found_hwnd = []
+    
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    def enum_callback(hwnd, lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        
+        # Get window title
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        title = buf.value
+        
+        # Get window class name
+        cls_buf = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, cls_buf, 256)
+        cls = cls_buf.value
+        
+        # Match Windows Security / WebAuthn dialog
+        # Class: "Credential Dialog Xaml Host" or "#32770" (standard dialog)
+        # Title: "Windows Security", "Windows 安全中心", "Windows Hello", etc.
+        title_lower = title.lower()
+        is_webauthn = (
+            # Known WebAuthn dialog class
+            cls in ("Credential Dialog Xaml Host", "Credential Dialog Xaml Host Window", 
+                    "#32770", "WindowsForms10.Window") or
+            # Known dialog titles
+            "windows security" in title_lower or
+            "windows 安全" in title_lower or
+            "windows hello" in title_lower or
+            "passkey" in title_lower or
+            "通行密钥" in title_lower or
+            "security key" in title_lower or
+            "选择保存通行密钥" in title_lower or
+            "保存通行密钥" in title_lower
+        )
+        
+        # Also check: it must be a dialog/popup, not a main window
+        # WebAuthn dialogs are typically small (< 800x600)
+        if is_webauthn:
+            rect = ctypes.wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            w = rect.right - rect.left
+            h = rect.bottom - rect.top
+            # WebAuthn dialog is typically 400-700px wide and 300-600px tall
+            if 200 < w < 900 and 150 < h < 800:
+                logger.info("[OS_INPUT] Found WebAuthn dialog: title='%s' class='%s' size=%dx%d",
+                           title[:50], cls, w, h)
+                found_hwnd.append(hwnd)
+                return True  # Keep looking in case there are multiple
+        
+        return True
+    
+    deadline = time.monotonic() + timeout
+    
+    while time.monotonic() < deadline:
+        found_hwnd.clear()
+        user32.EnumWindows(enum_callback, 0)
+        
+        if found_hwnd:
+            for hwnd in found_hwnd:
+                # Strategy 1: Send WM_CLOSE to the dialog
+                user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                logger.info("[OS_INPUT] Sent WM_CLOSE to WebAuthn dialog hwnd=%d", hwnd)
+            
+            time.sleep(0.5)
+            
+            # Check if dialog was closed
+            still_visible = any(user32.IsWindowVisible(h) for h in found_hwnd)
+            if not still_visible:
+                logger.info("[OS_INPUT] WebAuthn dialog dismissed successfully")
+                return True
+            
+            # If still visible, try sending Escape to that specific window
+            for hwnd in found_hwnd:
+                user32.PostMessageW(hwnd, WM_KEYDOWN, VK_ESCAPE, 0)
+                time.sleep(0.05)
+                user32.PostMessageW(hwnd, WM_KEYUP, VK_ESCAPE, 0)
+                logger.info("[OS_INPUT] Sent Escape to WebAuthn dialog hwnd=%d", hwnd)
+            
+            time.sleep(0.5)
+            
+            still_visible = any(user32.IsWindowVisible(h) for h in found_hwnd)
+            if not still_visible:
+                logger.info("[OS_INPUT] WebAuthn dialog dismissed via Escape")
+                return True
+            
+            # Last resort: Tab to "Cancel" button + Enter
+            for hwnd in found_hwnd:
+                # Set foreground and send Tab + Enter
+                user32.SetForegroundWindow(hwnd)
+                time.sleep(0.2)
+            
+            _key_down(0x09)  # VK_TAB
+            time.sleep(0.05)
+            _key_up(0x09)
+            time.sleep(0.2)
+            _key_down(0x0D)  # VK_RETURN
+            time.sleep(0.05)
+            _key_up(0x0D)
+            time.sleep(0.5)
+            
+            still_visible = any(user32.IsWindowVisible(h) for h in found_hwnd)
+            if not still_visible:
+                logger.info("[OS_INPUT] WebAuthn dialog dismissed via Tab+Enter")
+                return True
+            
+            logger.warning("[OS_INPUT] WebAuthn dialog still visible after all attempts")
+            return False
+        
+        # Dialog not found yet, wait and retry
+        time.sleep(0.5)
+    
+    # Dialog never appeared or was already dismissed
+    logger.info("[OS_INPUT] No WebAuthn dialog found (timeout=%.0fs)", timeout)
+    return False)
+
+
 def _char_to_vk(char: str) -> int | None:
     """Convert character to Windows Virtual Key code."""
     char_map = {
