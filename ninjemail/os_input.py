@@ -207,6 +207,17 @@ def os_press_tab():
         subprocess.run(["xdotool", "key", "Tab"], check=False)
 
 
+def os_press_escape():
+    """Press Escape key."""
+    if IS_WINDOWS:
+        vk = 0x1B  # VK_ESCAPE
+        _key_down(vk)
+        time.sleep(0.05)
+        _key_up(vk)
+    elif IS_LINUX:
+        subprocess.run(["xdotool", "key", "Escape"], check=False)
+
+
 def _char_to_vk(char: str) -> int | None:
     """Convert character to Windows Virtual Key code."""
     char_map = {
@@ -305,23 +316,46 @@ def browser_to_screen_coords(browser_x: float, browser_y: float,
     )
 
 
-def get_browser_window_position() -> tuple[int, int]:
-    """Get the position of the Chrome browser window on screen."""
+def get_browser_window_position(debug_port: int = 0) -> tuple[int, int]:
+    """Get the position of the Chrome browser window on screen.
+    
+    并发安全: 如果指定 debug_port，只返回监听该端口的 Chrome 窗口位置。
+    """
     if IS_WINDOWS:
         try:
             import subprocess
-            # Use PowerShell to find Chrome window position
-            result = subprocess.run(
-                ["powershell", "-Command",
-                 "Add-Type -AssemblyName System.Windows.Forms; "
-                 "$p = Get-Process chrome -ErrorAction SilentlyContinue | Where-Object {$_.MainWindowHandle -ne 0} | Select-Object -First 1; "
-                 "if ($p) { "
-                 "  $rect = New-Object System.Drawing.Rectangle; "
-                 "  [Win32]::GetWindowRect($p.MainWindowHandle, [ref]$rect); "
-                 "  Write-Output \"$($rect.X),$($rect.Y)\" "
-                 "} else { Write-Output '0,0' }"],
-                capture_output=True, text=True, timeout=5
-            )
+            if debug_port > 0:
+                # 按 debug port 查找特定 Chrome 进程的窗口
+                ps_cmd = (
+                    "Add-Type -AssemblyName System.Windows.Forms; "
+                    f"$cmdline = (Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                    f"Where-Object {{$_.CommandLine -like '*remote-debugging-port={debug_port}*'}}).ProcessId; "
+                    f"if ($cmdline) {{ "
+                    f"  $p = Get-Process -Id $cmdline -ErrorAction SilentlyContinue; "
+                    f"  if ($p -and $p.MainWindowHandle -ne 0) {{ "
+                    f"    $rect = New-Object System.Drawing.Rectangle; "
+                    f"    [Win32]::GetWindowRect($p.MainWindowHandle, [ref]$rect); "
+                    f"    Write-Output \"$($rect.X),$($rect.Y)\" "
+                    f"  }} "
+                    f"}} else {{ Write-Output '0,0' }}"
+                )
+                result = subprocess.run(
+                    ["powershell", "-Command", ps_cmd],
+                    capture_output=True, text=True, timeout=5
+                )
+            else:
+                # 原始行为: 找第一个 Chrome 窗口
+                result = subprocess.run(
+                    ["powershell", "-Command",
+                     "Add-Type -AssemblyName System.Windows.Forms; "
+                     "$p = Get-Process chrome -ErrorAction SilentlyContinue | Where-Object {$_.MainWindowHandle -ne 0} | Select-Object -First 1; "
+                     "if ($p) { "
+                     "  $rect = New-Object System.Drawing.Rectangle; "
+                     "  [Win32]::GetWindowRect($p.MainWindowHandle, [ref]$rect); "
+                     "  Write-Output \"$($rect.X),$($rect.Y)\" "
+                     "} else { Write-Output '0,0' }"],
+                    capture_output=True, text=True, timeout=5
+                )
             if result.returncode == 0:
                 parts = result.stdout.strip().split(",")
                 if len(parts) == 2:

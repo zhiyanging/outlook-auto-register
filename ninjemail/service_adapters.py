@@ -2119,7 +2119,7 @@ def probe_network_routes(urls: list[str] | None = None) -> list[dict[str, Any]]:
 
 def auto_configure_free_services(
     *,
-    browser: str = "undetected-chrome",
+    browser: str = "chrome",
     country: str = "USA",
     proxy_api_key: str = "",
     webshare_token: str = "",

@@ -1,9 +1,19 @@
-import os, sys, webbrowser, threading, random, string, re, time
+import os, sys, webbrowser, threading, random, string, re, time, json
 from pathlib import Path
+
+# Fix Windows GBK encoding crash on emoji characters
+try:
+    if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, Body
+from fastapi import FastAPI, Depends, HTTPException, Body, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -141,13 +151,50 @@ PORT = 18080
 
 @asynccontextmanager
 async def lifespan(app_instance):
-    """服务器启动后自动打开浏览器"""
-    def open_browser():
+    """服务器启动时检测系统代理"""
+    import os
+    os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+    # 启动阶段
+    def _do_startup():
         import time
-        time.sleep(0.8)
+        time.sleep(0.5)
         webbrowser.open(f"http://localhost:{PORT}")
-    threading.Thread(target=open_browser, daemon=True).start()
-    yield
+    threading.Thread(target=_do_startup, daemon=True).start()
+    # 加载本地代理配置（从文件恢复）
+    _load_local_proxy_from_file()
+
+    # 启动 mihomo 订阅代理（后台线程，不阻塞服务器启动）
+    def _start_mihomo_bg():
+        try:
+            from ninjemail.subscription_proxy import get_manager as _get_sub_mgr
+            _mgr = _get_sub_mgr()
+            if _mgr.subscriptions:
+                ok, msg = _mgr.start()
+                if ok:
+                    print(f"[代理] ✅ mihomo 启动成功: {msg}")
+                else:
+                    print(f"[代理] ⚠️ mihomo 启动失败: {msg}")
+            else:
+                from ninjemail.subscription_proxy import detect_system_proxy
+                proxy = detect_system_proxy()
+                if proxy:
+                    print(f"[代理] ✅ 检测到系统代理: {proxy}")
+                else:
+                    print("[代理] ⚠️ 未检测到代理，请先添加订阅或启动系统代理软件")
+        except Exception as e:
+            print(f"[代理] 启动异常: {e}")
+    threading.Thread(target=_start_mihomo_bg, daemon=True).start()
+
+    yield  # 服务器运行中...
+
+    # ─── 关闭阶段: 清理 mihomo ───
+    try:
+        from ninjemail.subscription_proxy import get_manager as _get_sub_mgr
+        _mgr = _get_sub_mgr()
+        _mgr.cleanup()
+        print("[代理] ✅ mihomo 已随主程序关闭")
+    except Exception as e:
+        print(f"[代理] 关闭异常: {e}")
 
 app = FastAPI(title="令牌取件系统", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -595,11 +642,61 @@ REG_STATE = {"running": False, "paused": False, "provider": "", "count": 0, "com
              "active_slots": [],  # 并发槽位: [{slot_id, status, email, password, client_id, refresh_token, step, proxy}]
              "available_proxies": [], "proxy_rotate": False}
 REG_LOCK = threading.Lock()
+_FILE_WRITE_LOCK = threading.Lock()  # 保护文件写入的锁（并发注册时避免文件损坏）
 
 # 可用代理列表（独立于 REG_STATE，跨任务持久）
 _AVAILABLE_PROXIES: list[str] = []
 _PROXY_ROTATE = False
 _PROXY_DETECT_PROGRESS = {"running": False, "done": 0, "total": 0, "available": 0, "unavailable": 0}
+
+# 本地代理配置（用户手动设置的本地代理，如 127.0.0.1:7890）
+_LOCAL_PROXY = {"url": "", "enabled": False}  # url: 代理地址, enabled: 是否启用
+_LOCAL_PROXY_LOCK = threading.Lock()
+
+def _normalize_proxy_url(url: str) -> str:
+    """自动补全代理地址的协议前缀"""
+    url = url.strip()
+    if not url:
+        return url
+    # 已有协议前缀，不处理
+    if "://" in url:
+        return url
+    # 裸地址自动加 http://（Clash/mihomo 默认端口是 HTTP 代理）
+    return f"http://{url}"
+
+def _save_local_proxy_to_file():
+    """将本地代理配置持久化到 runtime_config.toml"""
+    try:
+        with _LOCAL_PROXY_LOCK:
+            url = _LOCAL_PROXY["url"]
+            enabled = _LOCAL_PROXY["enabled"]
+        if load_runtime_config and save_runtime_config:
+            config = load_runtime_config()
+            if "local_proxy" not in config:
+                config["local_proxy"] = {}
+            config["local_proxy"]["url"] = url
+            config["local_proxy"]["enabled"] = enabled
+            save_runtime_config(config)
+            logger.info(f"[代理] 本地代理已保存到配置文件: {url} (启用={enabled})")
+    except Exception as e:
+        logger.warning(f"保存本地代理配置失败: {e}")
+
+def _load_local_proxy_from_file():
+    """从 runtime_config.toml 加载本地代理配置"""
+    try:
+        if not load_runtime_config:
+            return
+        config = load_runtime_config()
+        lp = config.get("local_proxy", {})
+        url = lp.get("url", "")
+        enabled = lp.get("enabled", False)
+        if url:
+            with _LOCAL_PROXY_LOCK:
+                _LOCAL_PROXY["url"] = url
+                _LOCAL_PROXY["enabled"] = enabled
+            logger.info(f"[代理] 从配置加载本地代理: {url} (启用={enabled})")
+    except Exception as e:
+        logger.warning(f"加载本地代理配置失败: {e}")
 
 SUPPORTED_PY_REGISTER_PROVIDERS = {"outlook", "hotmail", "gmail", "yahoo", "myyahoo"}
 EXTENSION_ONLY_PROVIDERS = {"proton", "gmx", "aol", "zoho", "yandex", "mailcom", "icloud", "mailru", "naver", "kakao", "netease163", "netease126", "neteaseyeah", "qq", "sina", "sohu", "tutanota"}
@@ -640,7 +737,12 @@ def _credential_output_dir() -> str:
     return BATCH_REG_DIR
 
 def save_credential_file(email, password, client_id="", refresh_token=""):
-    """保存四凭证到 Ninjemail 原始凭证目录。"""
+    """保存四凭证到 Ninjemail 原始凭证目录（并发安全）。"""
+    with _FILE_WRITE_LOCK:
+        return _save_credential_file_impl(email, password, client_id, refresh_token)
+
+def _save_credential_file_impl(email, password, client_id="", refresh_token=""):
+    """保存四凭证的实际实现（内部函数，由 save_credential_file 加锁调用）。"""
     client_id = client_id or (globals().get("NINJEMAIL_BUILTIN_CLIENT_ID") or "14d82eec-204b-4c2f-b7e8-296a70dab67e")
     output_dir = _credential_output_dir()
     os.makedirs(output_dir, exist_ok=True)
@@ -665,6 +767,10 @@ def save_credential_file(email, password, client_id="", refresh_token=""):
 
 
 def auto_import_to_library(email, password, client_id="", refresh_token="", group="批量注册"):
+    with _FILE_WRITE_LOCK:
+        return _auto_import_to_library_impl(email, password, client_id, refresh_token, group)
+
+def _auto_import_to_library_impl(email, password, client_id="", refresh_token="", group="批量注册"):
     db = SessionLocal()
     try:
         if db.query(Account).filter(Account.email == email).first():
@@ -855,27 +961,34 @@ def run_registration_task(provider, count, password, group_name, proxy_list,
                           captcha_key, sms_config, browser, visible, tun_mode=False, concurrent=1):
     global REG_STATE, _PROXY_ROTATE
     concurrent = max(1, min(int(concurrent or 1), 10))
+    # 并发模式下，总注册数 = 用户指定数量（count），concurrent 只控制同时运行的线程数
+    actual_count = count
     credential_dir = _credential_output_dir()
-    # 初始化并发槽位
+    # 初始化并发槽位：槽位数 = 实际任务数，每个任务独占一个槽位
     slots = [{"slot_id": i, "status": "idle", "email": "", "password": "", "client_id": "",
-              "refresh_token": "", "step": "等待中", "proxy": ""} for i in range(concurrent)]
+              "refresh_token": "", "step": "等待中", "proxy": ""} for i in range(actual_count)]
     with REG_LOCK:
-        REG_STATE.update(running=True, provider=provider, count=count, completed=0,
+        REG_STATE.update(running=True, provider=provider, count=actual_count, completed=0,
                          concurrent=concurrent,
                          success=0, failed=0, errors=[], results=[], stop_flag=False, paused=False,
                          logs=[], steps=[], active_proxy="", proxy_count=0,
                          credential_dir=credential_dir, last_credential_path="",
                          current_email="", current_password="", current_client_id="", current_step="",
                          active_slots=slots)
-    reg_log(f"任务启动:服务商={provider},数量={count},四凭证目录={credential_dir}", "step", "start")
-    # 重置 CDP 引擎的全局停止/暂停标志（上次任务的残留会导致新任务秒退）
+    reg_log(f"任务启动:服务商={provider},数量={actual_count},并发={concurrent},四凭证目录={credential_dir}", "step", "start")
+    # 彻底重置 CDP 引擎的所有控制状态（全局变量+线程状态字典），防止残留 stop/paused 导致新任务秒退
     try:
-        from ninjemail.cdp_outlook import set_registration_stop, set_registration_paused, set_captcha_force_skip
-        set_registration_stop(False)
-        set_registration_paused(False)
-        set_captcha_force_skip(False)
-    except Exception:
-        pass
+        from ninjemail.cdp_outlook import reset_all_states
+        reset_all_states()
+    except Exception as e:
+        logger.warning("重置 CDP 控制状态失败: %s，尝试旧方式", e)
+        try:
+            from ninjemail.cdp_outlook import set_registration_stop, set_registration_paused, set_captcha_force_skip
+            set_registration_stop(False)
+            set_registration_paused(False)
+            set_captcha_force_skip(False)
+        except Exception:
+            pass
     try:
         from ninjemail.cdp_outlook import register_outlook_account, OutlookAccount, _random_account
 
@@ -883,9 +996,48 @@ def run_registration_task(provider, count, password, group_name, proxy_list,
         if proxy_errors:
             reg_log("代理转换提醒:" + ";".join(proxy_errors), "warn", "proxy_normalize")
 
-        # 优先使用已检测的可用代理（有就直接用，不需要手动开启轮询）
-        if _AVAILABLE_PROXIES:
-            use_proxies = list(_AVAILABLE_PROXIES)
+        # ====== 代理源优先级: 本地代理 > 订阅代理 > 已检测代理 > 手动代理 ======
+
+        # 1. 检查本地代理是否启用
+        _local_proxy_url = ""
+        with _LOCAL_PROXY_LOCK:
+            _local_enabled = _LOCAL_PROXY["enabled"]
+            _local_url = _LOCAL_PROXY["url"]
+        if _local_enabled and _local_url:
+            _local_proxy_url = _local_url
+            reg_log(f"🏠 使用本地代理: {_local_proxy_url}", "ok", "local_proxy")
+
+        # 2. 检查订阅代理
+        _sub_proxy_url = ""
+        if not _local_proxy_url:  # 本地代理未启用时才尝试订阅代理
+            try:
+                _spm = _sub_proxy()
+                if _spm and _spm.is_running:
+                    # 注册前自动切换到 alive 节点
+                    try:
+                        ok, msg = _spm.find_alive_node()
+                        if ok:
+                            reg_log(f"🌐 已切换到可用节点: {msg}", "ok", "alive_node")
+                        else:
+                            reg_log(f"⚠️ 找不到可用节点: {msg}", "warn", "no_alive")
+                    except Exception:
+                        pass
+                    _sub_proxy_url = _spm.proxy_url
+                    reg_log(f"🌐 使用订阅代理: {_sub_proxy_url}", "ok", "sub_proxy")
+            except Exception:
+                pass
+
+        # 3. 根据优先级选择代理源
+        if _local_proxy_url:
+            proxies = [_local_proxy_url]
+            _PROXY_ROTATE = False
+            reg_log(f"✅ 使用本地代理: {_local_proxy_url}", "ok", "proxy_local")
+        elif _sub_proxy_url:
+            proxies = [_sub_proxy_url]
+            _PROXY_ROTATE = False
+            reg_log(f"✅ 使用订阅代理: {_sub_proxy_url}", "ok", "proxy_sub")
+        elif _AVAILABLE_PROXIES:
+            proxies = list(_AVAILABLE_PROXIES)
             if _PROXY_ROTATE:
                 reg_log(f"🔄 轮询模式:使用 {len(_AVAILABLE_PROXIES)} 个已检测可用代理", "ok", "proxy_rotate")
             else:
@@ -894,12 +1046,17 @@ def run_registration_task(provider, count, password, group_name, proxy_list,
                 with REG_LOCK:
                     REG_STATE["proxy_rotate"] = True
         elif normalized_proxies:
-            use_proxies = normalized_proxies
-            reg_log(f"使用 {len(normalized_proxies)} 个手动输入代理", "proxy", "proxy_manual")
+            proxies = normalized_proxies
+            if len(normalized_proxies) > 1:
+                _PROXY_ROTATE = True
+                with REG_LOCK:
+                    REG_STATE["proxy_rotate"] = True
+                reg_log(f"🔄 手动输入 {len(normalized_proxies)} 个代理，自动开启轮询", "ok", "proxy_manual_rotate")
+            else:
+                reg_log(f"使用 {len(normalized_proxies)} 个手动输入代理", "proxy", "proxy_manual")
         else:
-            use_proxies = []
+            proxies = []
             reg_log("未使用代理:代理列表为空且无已检测可用代理", "warn", "proxy_empty")
-        proxies = use_proxies if use_proxies else None
         with REG_LOCK:
             REG_STATE["proxy_count"] = len(proxies or [])
             REG_STATE["active_proxy"] = (proxies or [""])[0]
@@ -935,8 +1092,9 @@ def run_registration_task(provider, count, password, group_name, proxy_list,
                         return False
                 time.sleep(0.5)
 
-        def _do_register(proxy_url, account=None):
+        def _do_register(proxy_url, account=None, slot_index=0):
             """纯 CDP 注册,返回 RegistrationResult"""
+            reg_log(f"注册引擎参数:browser_type={browser},visible={visible},slot={slot_index}", "step", "browser_type")
             return register_outlook_account(
                 account=account,
                 browser_type=browser,
@@ -944,39 +1102,77 @@ def run_registration_task(provider, count, password, group_name, proxy_list,
                 headless=not visible,
                 extract_rt=True,
                 pause_checker=_pause_checker,
+                slot_index=slot_index,
             )
 
         # 代理轮询状态
         proxy_fail_count = {}  # {proxy_url: fail_count}
         proxy_idx = 0  # 当前代理索引
         MAX_PROXY_FAILS = 3  # 单个代理最大失败次数
+        _proxy_lock = threading.Lock()  # 保护代理轮询的锁
+        _sub_node_idx = 0  # 订阅代理节点轮询索引（并发/批量时每个注册任务递增）
 
         def _get_next_proxy():
-            """获取下一个可用代理，跳过已失败3次的"""
-            nonlocal proxy_idx
-            if not proxies:
-                return ""
-            for _ in range(len(proxies)):
-                p = proxies[proxy_idx % len(proxies)]
-                proxy_idx += 1
-                if proxy_fail_count.get(p, 0) < MAX_PROXY_FAILS:
-                    return p
-            # 所有代理都失败3次了，返回第一个继续试
+            """获取下一个可用代理，跳过已失败3次的（线程安全）。
+            使用订阅代理时，每次调用自动切换 mihomo 节点（顺序轮询1→2→...→n→1）"""
+            nonlocal _sub_node_idx, proxy_idx
+            with _proxy_lock:
+                if not proxies:
+                    return ""
+                # 订阅代理轮询: 每次调用切换到下一个节点
+                if _sub_proxy_url:
+                    try:
+                        _spm = _sub_proxy()
+                        if _spm and _spm.is_running:
+                            # 顺序切换到下一个节点
+                            nodes = _spm.get_nodes()
+                            alive_nodes = [n for n in nodes if n.get("alive", False) and n["name"] not in ("COMPATIBLE", "DIRECT", "PASS", "REJECT", "REJECT-DROP")]
+                            pool = alive_nodes if alive_nodes else nodes
+                            if pool:
+                                # 按顺序轮询
+                                target = pool[_sub_node_idx % len(pool)]
+                                _sub_node_idx += 1
+                                ok, msg = _spm.switch_to_node(target["name"])
+                                if ok:
+                                    reg_log(f"🔄 订阅节点轮询: {msg}", "ok", "node_rotate")
+                                else:
+                                    reg_log(f"⚠️ 订阅节点切换失败: {msg}", "warn", "node_rotate_fail")
+                    except Exception as e:
+                        reg_log(f"订阅节点轮询异常: {e}", "warn", "node_rotate_err")
+                    return _sub_proxy_url
+                # 本地代理 / 手动代理列表轮询
+                for _ in range(len(proxies)):
+                    p = proxies[proxy_idx % len(proxies)]
+                    proxy_idx += 1
+                    if proxy_fail_count.get(p, 0) < MAX_PROXY_FAILS:
+                        return p
+                # 所有代理都失败3次了，返回第一个继续试
             return proxies[0]
 
-        def _register_single(i, slot_id):
-            """单个账号注册流程（可在线程中运行）"""
+        def _register_single(i, slot_id, pre_assigned_proxy=None):
+            """单个账号注册流程（可在线程中运行）
+            pre_assigned_proxy: 并发模式下预分配的代理URL，为None时使用_get_next_proxy()
+            """
+            import threading as _thr
+            logger.info(f"[并发] 线程启动: task={i}, slot={slot_id}, thread={_thr.current_thread().name}, proxy={pre_assigned_proxy or 'auto'}")
             with REG_LOCK:
                 if REG_STATE["stop_flag"]:
+                    REG_STATE["completed"] += 1
                     return
-                REG_STATE["current"] = f"🔹 正在创建第 {i+1}/{count} 个 {provider} 邮箱..."
+                # 并发时不覆盖全局 current（会互相干扰），用 slot 显示进度
+                if concurrent <= 1:
+                    REG_STATE["current"] = f"🔹 正在创建第 {i+1}/{actual_count} 个 {provider} 邮箱..."
             if check_pause():
+                with REG_LOCK:
+                    REG_STATE["completed"] += 1
                 return
-            reg_log(f"开始第 {i+1}/{count} 个账号注册流程", "step", "account_start")
+            reg_log(f"开始第 {i+1}/{actual_count} 个账号注册流程", "step", "account_start")
             _update_slot(slot_id, status="running", step="准备中")
             with REG_LOCK:
                 REG_STATE["current_step"] = "preparing"
-            current_proxy = _get_next_proxy()
+            # 系统代理由 Clash Verge 管理，无需手动轮循
+            # 并发模式下使用预分配的代理，顺序模式下使用轮询
+            current_proxy = pre_assigned_proxy if pre_assigned_proxy is not None else _get_next_proxy()
             if current_proxy:
                 with REG_LOCK:
                     REG_STATE["active_proxy"] = current_proxy
@@ -986,15 +1182,17 @@ def run_registration_task(provider, count, password, group_name, proxy_list,
             try:
                 reg_log(f"调用纯 CDP 注册引擎:provider={provider},proxy={current_proxy or 'none'}", "step", "call_cdp")
 
-                # 预生成账号,立即更新前端凭证显示
+                # 预生成账号,更新前端凭证显示（优先更新 slot，全局字段仅在单线程时更新）
                 pre_account = _random_account(
                     domain="hotmail.com" if provider == "hotmail" else "outlook.com",
                     provider=provider
                 )
                 with REG_LOCK:
-                    REG_STATE["current_email"] = pre_account.email
-                    REG_STATE["current_password"] = pre_account.password
-                    REG_STATE["current_client_id"] = pre_account.client_id
+                    # 并发时只更新 slot，不覆盖全局字段（避免线程间覆盖）
+                    if concurrent <= 1:
+                        REG_STATE["current_email"] = pre_account.email
+                        REG_STATE["current_password"] = pre_account.password
+                        REG_STATE["current_client_id"] = pre_account.client_id
                 _update_slot(slot_id, email=pre_account.email, password=pre_account.password,
                              client_id=pre_account.client_id, step="账号已生成")
                 reg_log(f"账号已生成: {pre_account.email} | 密码已就绪 | ClientID={pre_account.client_id}", "cred", "account_ready")
@@ -1008,17 +1206,20 @@ def run_registration_task(provider, count, password, group_name, proxy_list,
                     else:
                         reg_log("代理 curl 预检失败(但继续尝试)", "warn", "curl_fail")
 
-                result = _do_register(current_proxy if not tun_mode else "", account=pre_account)
+                result = _do_register(current_proxy if not tun_mode else "", account=pre_account, slot_index=slot_id)
                 # 注册返回后立即检查停止标志
                 with REG_LOCK:
                     if REG_STATE.get("stop_flag"):
                         reg_log("任务已停止（注册引擎返回后检测到停止标志）", "warn", "stopped")
                         _update_slot(slot_id, step="已停止", status="stopped")
+                        REG_STATE["completed"] += 1
                         return
                 # 如果注册引擎返回 stopped，立即退出
                 if result and getattr(result, "error", "") == "stopped":
                     reg_log("注册引擎已停止", "warn", "stopped")
                     _update_slot(slot_id, step="已停止", status="stopped")
+                    with REG_LOCK:
+                        REG_STATE["completed"] += 1
                     return
                 if not result or not result.email:
                     raise ValueError(result.error if result else "注册未返回结果")
@@ -1028,10 +1229,12 @@ def run_registration_task(provider, count, password, group_name, proxy_list,
                 refresh_token = getattr(result, "refresh_token", "") or ""
                 client_id = getattr(result, "client_id", "") or "14d82eec-204b-4c2f-b7e8-296a70dab67e"
                 # Update REG_STATE with current credentials for frontend display
+                # 并发时只更新 slot，不覆盖全局字段
                 with REG_LOCK:
-                    REG_STATE["current_email"] = email or ""
-                    REG_STATE["current_password"] = pwd or ""
-                    REG_STATE["current_client_id"] = client_id or ""
+                    if concurrent <= 1:
+                        REG_STATE["current_email"] = email or ""
+                        REG_STATE["current_password"] = pwd or ""
+                        REG_STATE["current_client_id"] = client_id or ""
 
                 # 第二层:从注册流程读取的自动国家 vs curl 国家
                 browser_country = getattr(result, "auto_country", "") or ""
@@ -1047,6 +1250,12 @@ def run_registration_task(provider, count, password, group_name, proxy_list,
 
                 # ====== 前提:注册成功!才往下走 ======
                 if getattr(result, 'error', ''):
+                    # 即使有错误，如果注册成功了（有邮箱和密码），先保存三凭证
+                    if email and pwd and getattr(result, 'success', False):
+                        reg_log(f"⚠️ 注册成功但后续页面出错: {result.error[:100]}（三凭证已保存）", "warn", "partial_success")
+                        save_credential_file(email, pwd, client_id=client_id, refresh_token="")
+                        auto_import_to_library(email, pwd, client_id=client_id, refresh_token="", group=group_name)
+                        reg_log(f"✅ 三凭证已保存（注册成功确认）: {email} | 密码:{pwd} | ClientID:{client_id}", "ok", "cred_saved")
                     raise ValueError(f"注册失败: {result.error}")
                 if not getattr(result, 'success', False):
                     raise ValueError("注册未成功(CAPTCHA 未通过或页面未到达账户主页)")
@@ -1055,20 +1264,20 @@ def run_registration_task(provider, count, password, group_name, proxy_list,
                 reg_log(f"✅ 注册成功:{email} | 密码:{pwd}", "ok", "reg_success")
                 _update_slot(slot_id, email=email, password=pwd, client_id=client_id, step="注册成功")
 
-                # ====== 第一步:保存凭证(邮箱+密码+ID) ======
+                # ====== 第一步:立即保存三凭证(邮箱+密码+ID) ======
                 cred_path = save_credential_file(email, pwd, client_id=client_id, refresh_token="")
                 auto_import_to_library(email, pwd, client_id=client_id, refresh_token="", group=group_name)
-                reg_log(f"凭证已保存:{email} | 密码:{pwd} | ClientID:{client_id}", "ok", "cred_saved")
+                reg_log(f"✅ 三凭证已保存: {email} | 密码:{pwd} | ClientID:{client_id}", "ok", "cred_saved")
 
                 # ====== 第二步：尝试获取 refresh_token ======
                 if not refresh_token:
                     reg_log("注册流程未获取到 RT（extract_rt 已尝试过）", "info", "rt_skip")
 
-                # ====== 第三步:有 RT 就更新文件 ======
+                # ====== 第三步:有 RT 就补全四凭证 ======
                 if refresh_token:
                     cred_path = save_credential_file(email, pwd, client_id=client_id, refresh_token=refresh_token)
                     auto_import_to_library(email, pwd, client_id=client_id, refresh_token=refresh_token, group=group_name)
-                    reg_log(f"✅ RT 获取成功,已更新:{email}", "ok", "rt_updated")
+                    reg_log(f"✅ RT 已补全,四凭证更新: {email}", "ok", "rt_updated")
 
                 four_line = f"{email}----{pwd}----{client_id}----{refresh_token}"
                 with REG_LOCK:
@@ -1080,87 +1289,78 @@ def run_registration_task(provider, count, password, group_name, proxy_list,
                                                   "credential_dir": os.path.dirname(cred_path), "account_id": i+1})
                 reg_log(f"四凭证最终保存:{email} | 密码:{pwd} | ClientID:{client_id} | RT={refresh_token[:20]+'...' if refresh_token else '无'}", "ok", "account_saved")
                 _update_slot(slot_id, refresh_token=refresh_token, step="完成", status="done")
-                logger.info(f"[REG] ✅ {i+1}/{count} done: {email}")
+                logger.info(f"[REG] ✅ {i+1}/{actual_count} done: {email}")
             except Exception as exc:
                 error_msg = str(exc)
                 _update_slot(slot_id, step=f"失败: {error_msg[:50]}", status="failed")
-                # 标记当前代理失败
+                # 标记当前代理失败（线程安全）
                 if current_proxy:
-                    proxy_fail_count[current_proxy] = proxy_fail_count.get(current_proxy, 0) + 1
-                    fails = proxy_fail_count[current_proxy]
+                    with _proxy_lock:
+                        proxy_fail_count[current_proxy] = proxy_fail_count.get(current_proxy, 0) + 1
+                        fails = proxy_fail_count[current_proxy]
                     if fails >= MAX_PROXY_FAILS:
                         reg_log(f"代理 {current_proxy} 已失败 {fails} 次，标记为不可用，下次自动切换", "warn", "proxy_blacklist")
-                    # 如果有其他可用代理，用下一个代理重试本次账号
-                    if proxies and len(proxies) > 1:
-                        next_proxy = _get_next_proxy()
-                        if next_proxy != current_proxy:
-                            reg_log(f"代理失败({error_msg[:80]})，切换到下一个代理: {next_proxy}", "warn", "proxy_rotate")
-                            try:
-                                result = _do_register(next_proxy, account=pre_account)
-                                if result and result.email and getattr(result, 'success', False):
-                                    email = result.email
-                                    pwd = result.password
-                                    refresh_token = getattr(result, "refresh_token", "") or ""
-                                    client_id = getattr(result, "client_id", "") or "14d82eec-204b-4c2f-b7e8-296a70dab67e"
-                                    reg_log(f"✅ 代理切换后注册成功:{email} | 密码:{pwd}", "ok", "reg_success")
-                                    cred_path = save_credential_file(email, pwd, client_id=client_id, refresh_token="")
-                                    auto_import_to_library(email, pwd, client_id=client_id, refresh_token="", group=group_name)
-                                    reg_log(f"凭证已保存:{email} | 密码:{pwd} | ClientID:{client_id}", "ok", "cred_saved")
-                                    if refresh_token:
-                                        save_credential_file(email, pwd, client_id=client_id, refresh_token=refresh_token)
-                                        auto_import_to_library(email, pwd, client_id=client_id, refresh_token=refresh_token, group=group_name)
-                                    four_line = f"{email}----{pwd}----{client_id}----{refresh_token}"
-                                    with REG_LOCK:
-                                        REG_STATE["success"] += 1
-                                        REG_STATE["results"].append({"email": email, "password": pwd, "client_id": client_id,
-                                                                      "refresh_token": refresh_token, "four_credential": four_line,
-                                                                      "status": "success", "credential_path": cred_path,
-                                                                      "credential_dir": os.path.dirname(cred_path), "account_id": i+1})
-                                    reg_log(f"四凭证最终保存:{email}", "ok", "account_saved")
-                                    logger.info(f"[REG] ✅ {i+1}/{count} done (proxy rotated): {email}")
-                                else:
-                                    proxy_fail_count[next_proxy] = proxy_fail_count.get(next_proxy, 0) + 1
-                                    raise ValueError(result.error if result else "切换代理后注册也失败")
-                            except Exception as exc_rot:
-                                with REG_LOCK:
-                                    REG_STATE["failed"] += 1
-                                    REG_STATE["errors"].append(f"#{i+1}: proxy_rotate failed: {str(exc_rot)[:200]}")
-                                reg_log(f"代理切换后也失败:{str(exc_rot)[:300]}", "error", "account_failed")
-                                logger.error(f"[REG] ❌ {i+1}/{count} failed (proxy rotated): {exc_rot}")
-                        else:
-                            # 所有代理都试过了
-                            with REG_LOCK:
-                                REG_STATE["failed"] += 1
-                                REG_STATE["errors"].append(f"#{i+1}: 所有代理均失败: {error_msg[:200]}")
-                            reg_log(f"所有代理均失败，账号 #{i+1} 跳过", "error", "account_failed")
-                    else:
-                        with REG_LOCK:
-                            REG_STATE["failed"] += 1
-                            REG_STATE["errors"].append(f"#{i+1}: {error_msg[:300]}")
-                        reg_log(f"第 {i+1}/{count} 个账号失败:{error_msg[:300]}", "error", "account_failed")
-                        logger.error(f"[REG] ❌ {i+1}/{count} failed: {exc}")
-                else:
-                    with REG_LOCK:
-                        REG_STATE["failed"] += 1
-                        REG_STATE["errors"].append(f"#{i+1}: {error_msg[:300]}")
-                    reg_log(f"第 {i+1}/{count} 个账号失败:{error_msg[:300]}", "error", "account_failed")
-                    logger.error(f"[REG] ❌ {i+1}/{count} failed: {exc}")
+
+                # ====== 失败不再重试（代理轮询已在 _get_next_proxy 中每次自动切换节点）======
+                # 系统级阻碍（人机验证失败/封号）快速失败，下一个账号会自动用不同代理/节点
+                with REG_LOCK:
+                    REG_STATE["failed"] += 1
+                    REG_STATE["errors"].append(f"#{i+1}: {error_msg[:300]}")
+                reg_log(f"第 {i+1}/{actual_count} 个账号失败: {error_msg[:200]}", "error", "account_failed")
+                logger.error(f"[REG] ❌ {i+1}/{actual_count} failed: {exc}")
             with REG_LOCK:
                 REG_STATE["completed"] += 1
 
         # 执行注册：并发或顺序
+        _worker_procs = []  # 并发模式下的 mihomo 工作实例
         if concurrent > 1:
-            import concurrent.futures
-            reg_log(f"并发模式:同时注册 {concurrent} 个账号", "step", "concurrent_start")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrent) as executor:
+            from concurrent.futures import ThreadPoolExecutor as _TPE, wait as _futures_wait, ALL_COMPLETED as _ALL_DONE
+
+            # ====== 并发代理分配: 为每个并发任务创建独立的 mihomo 实例 ======
+            proxy_per_task = [None] * actual_count  # 每个任务的代理 URL
+            if _sub_proxy_url and concurrent > 1:
+                try:
+                    _spm = _sub_proxy()
+                    if _spm and _spm.is_running:
+                        alive_nodes = _spm.get_alive_nodes()
+                        if alive_nodes:
+                            reg_log(f"🔄 并发代理分配: {len(alive_nodes)} 个可用节点, {concurrent} 个并发任务", "ok", "concurrent_proxy")
+                            for task_i in range(actual_count):
+                                node = alive_nodes[task_i % len(alive_nodes)]
+                                port = 28889 + task_i  # 每个任务用不同端口
+                                ok, result_or_err, proc = _spm.create_worker(node, port)
+                                if ok:
+                                    proxy_per_task[task_i] = result_or_err
+                                    _worker_procs.append(proc)
+                                    reg_log(f"✅ 任务 {task_i+1}: 节点={node}, 代理={result_or_err}", "ok", f"worker_{task_i}")
+                                else:
+                                    proxy_per_task[task_i] = _sub_proxy_url  # 回退到主实例
+                                    reg_log(f"⚠️ 任务 {task_i+1}: 创建失败({result_or_err})，使用主代理", "warn", f"worker_fail_{task_i}")
+                        else:
+                            reg_log("⚠️ 无可用节点，所有并发任务使用同一代理", "warn", "no_alive_nodes")
+                except Exception as e:
+                    reg_log(f"⚠️ 并发代理分配异常: {e}，所有任务使用主代理", "warn", "concurrent_proxy_err")
+
+            reg_log(f"并发模式:同时注册 {concurrent} 个账号,总任务数={actual_count},独立代理实例={len(_worker_procs)}", "step", "concurrent_start")
+            with _TPE(max_workers=concurrent) as executor:
                 futures = []
-                for i in range(count):
+                for i in range(actual_count):
                     if REG_STATE.get("stop_flag"):
                         break
-                    slot_id = i % concurrent
-                    futures.append(executor.submit(_register_single, i, slot_id))
+                    # 每个任务独占一个槽位和一个独立代理
+                    futures.append(executor.submit(_register_single, i, i, proxy_per_task[i]))
                 # 等待所有线程完成
-                concurrent.futures.wait(futures, return_when=concurrent.futures.ALL_EXCEPTIONS)
+                _futures_wait(futures, return_when=_ALL_DONE)
+
+            # 清理所有工作实例
+            for proc in _worker_procs:
+                try:
+                    from ninjemail.subscription_proxy import SubscriptionProxyManager as _SPM
+                    _SPM.cleanup_worker(proc)
+                except Exception:
+                    pass
+            _worker_procs.clear()
+            reg_log("所有并发代理实例已清理", "ok", "workers_cleaned")
         else:
             for i in range(count):
                 if REG_STATE.get("stop_flag"):
@@ -1176,6 +1376,27 @@ def run_registration_task(provider, count, password, group_name, proxy_list,
             REG_STATE["running"] = False
             REG_STATE["current"] = ""
 
+@app.get("/api/browsers/available")
+def available_browsers():
+    """检测系统已安装的浏览器 + 所有支持的浏览器下载信息"""
+    try:
+        from ninjemail.cdp_browser import detect_installed_browsers, BROWSER_DOWNLOAD_INFO, BROWSER_PATHS
+        installed = detect_installed_browsers()
+        # 合并所有支持的浏览器（已安装 + 未安装但可下载）
+        all_browsers = {}
+        for key in BROWSER_PATHS:
+            if key in installed:
+                all_browsers[key] = {**installed[key], "installed": True}
+            elif key in BROWSER_DOWNLOAD_INFO:
+                dl = BROWSER_DOWNLOAD_INFO[key]
+                all_browsers[key] = {"name": dl["name"], "installed": False, "download_url": dl["url"], "installer": dl.get("installer", "")}
+            else:
+                all_browsers[key] = {"name": key, "installed": False}
+        return {"browsers": all_browsers, "installed_count": len(installed)}
+    except Exception as e:
+        return {"browsers": {}, "error": str(e)}
+
+
 @app.get("/api/register/providers")
 def register_providers():
     return {
@@ -1185,12 +1406,14 @@ def register_providers():
     }
 
 @app.post("/api/register/start")
-def register_start(provider: str = "outlook", count: int = 1, password: str = "",
-                   group_name: str = "批量注册", proxy_list: str = "",
-                   captcha_key: str = "", sms_config: str = "",
-                   browser: str = "undetected-chrome", visible: bool = True,
-                   tun_mode: bool = False, concurrent: int = 1):
+def register_start(provider: str = Form("outlook"), count: int = Form(1), password: str = Form(""),
+                   group_name: str = Form("批量注册"), proxy_list: str = Form(""),
+                   captcha_key: str = Form(""), sms_config: str = Form(""),
+                   browser: str = Form("chrome"), visible: bool = Form(True),
+                   tun_mode: bool = Form(False), concurrent: int = Form(1)):
     provider = (provider or "outlook").strip().lower()
+    browser = (browser or "chrome").strip().lower()
+    logger.info("[API] register/start received: provider=%s, browser=%s, count=%d, concurrent=%d", provider, browser, count, concurrent)
     if provider not in SUPPORTED_PY_REGISTER_PROVIDERS:
         return {"status": "error", "message": f"{provider} 目前属于浏览器扩展流程,不能由此 FastAPI 后端直接创建。"}
     count = max(1, min(int(count or 1), 100))
@@ -1224,7 +1447,8 @@ def register_stop():
     with REG_LOCK:
         REG_STATE["stop_flag"] = True
         REG_STATE["paused"] = False  # \u89e3\u9664\u6682\u505c\u4ee5\u4fbf\u7ebf\u7a0b\u80fd\u68c0\u6d4b\u5230\u505c\u6b62\u6807\u5fd7
-        REG_STATE["current"] = "\u23f9 \u6b63\u5728\u505c\u6b62\u4efb\u52a1..."
+        REG_STATE["running"] = False  # 立即标记为非运行，让前端按钮立即可用
+        REG_STATE["current"] = "\u23f9 \u4efb\u52a1\u5df2\u505c\u6b62"
     try:
         from ninjemail.cdp_outlook import set_registration_stop, set_registration_paused, stop_registration_browser
         set_registration_stop(True)
@@ -1441,6 +1665,12 @@ def ninjemail_proxy_detect(req: ProxyTextRequest):
     import subprocess, json as _j, concurrent.futures
     global _PROXY_DETECT_PROGRESS
 
+    # 检查 curl 是否可用
+    try:
+        subprocess.run(["curl", "--version"], capture_output=True, timeout=5)
+    except FileNotFoundError:
+        return {"ok": False, "status": "error", "reason": "系统未安装curl，无法进行代理检测。请先安装curl。", "count": 0, "available": [], "unavailable": []}
+
     # 高并发检测：curl 验证 HTTPS 连接 + 注册页内容
     _PROXY_DETECT_PROGRESS = {"running": True, "done": 0, "total": len(normalized), "available": 0, "unavailable": 0, "stage": "检测中"}
 
@@ -1572,6 +1802,89 @@ def ninjemail_proxy_set_rotate(req: dict = Body(None)):
     return {"ok": True, "rotate": enabled}
 
 
+# ====== 本地代理管理 ======
+
+@app.get("/api/local_proxy/status")
+def local_proxy_status():
+    """获取本地代理配置状态"""
+    with _LOCAL_PROXY_LOCK:
+        return {"ok": True, "url": _LOCAL_PROXY["url"], "enabled": _LOCAL_PROXY["enabled"]}
+
+
+@app.post("/api/local_proxy/set")
+def local_proxy_set(req: dict = Body(None)):
+    """设置本地代理地址（自动补全协议前缀）"""
+    url = _normalize_proxy_url(str((req or {}).get("url", "")).strip())
+    with _LOCAL_PROXY_LOCK:
+        _LOCAL_PROXY["url"] = url
+    _save_local_proxy_to_file()
+    return {"ok": True, "url": url}
+
+
+@app.post("/api/local_proxy/enable")
+def local_proxy_enable(req: dict = Body(None)):
+    """启用/禁用本地代理"""
+    enabled = bool((req or {}).get("enabled", True))
+    with _LOCAL_PROXY_LOCK:
+        _LOCAL_PROXY["enabled"] = enabled
+    _save_local_proxy_to_file()
+    return {"ok": True, "enabled": enabled}
+
+
+@app.get("/api/local_proxy/test")
+def local_proxy_test():
+    """测试本地代理连通性（多URL容错 + 详细错误信息）"""
+    with _LOCAL_PROXY_LOCK:
+        url = _LOCAL_PROXY["url"]
+    if not url:
+        return {"ok": False, "reason": "未设置本地代理地址"}
+    import subprocess
+    socks = url.replace("socks5://", "socks5h://").replace("socks4://", "socks4a://")
+    if not socks.startswith(("socks5h://", "socks4a://")):
+        socks = url  # http 代理不需要替换
+
+    # 多个测试URL容错
+    test_urls = [
+        "https://api.ipify.org?format=json",
+        "https://ipinfo.io/json",
+        "https://httpbin.org/ip",
+        "http://ip-api.com/json",
+    ]
+    last_error = ""
+    for test_url in test_urls:
+        try:
+            r = subprocess.run(
+                ["curl", "-s", "--max-time", "15", "--connect-timeout", "8", "--proxy", socks, test_url],
+                capture_output=True, text=True, timeout=20
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                try:
+                    info = json.loads(r.stdout)
+                    ip = info.get("ip", "") or info.get("origin", "") or info.get("ip", "")
+                    country = info.get("country", "")
+                    city = info.get("city", "")
+                    org = info.get("org", "")
+                    if ip:
+                        return {"ok": True, "ip": ip, "country": country, "city": city, "org": org}
+                except json.JSONDecodeError:
+                    last_error = f"响应解析失败: {r.stdout[:100]}"
+                    continue
+            else:
+                stderr_snippet = (r.stderr or "").strip()[:200]
+                last_error = f"curl返回码={r.returncode}" + (f", stderr={stderr_snippet}" if stderr_snippet else "")
+                continue
+        except subprocess.TimeoutExpired:
+            last_error = "curl超时(15秒)"
+            continue
+        except FileNotFoundError:
+            return {"ok": False, "reason": "系统未安装curl，无法测试代理连通性"}
+        except Exception as e:
+            last_error = str(e)[:200]
+            continue
+
+    return {"ok": False, "reason": f"本地代理连接失败: {last_error}"}
+
+
 @app.get("/api/ninjemail/config")
 def ninjemail_config_get():
     if load_runtime_config is None:
@@ -1645,6 +1958,207 @@ def debug_info():
         "batch_reg_dir": BATCH_REG_DIR,
     }
 
+# --------------- Subscription Proxy API ---------------
+try:
+    from ninjemail.subscription_proxy import get_manager as _get_sub_proxy_manager
+    from ninjemail.subscription_proxy import test_proxy as _test_sys_proxy
+    _SUB_PROXY_AVAILABLE = True
+except Exception as _sub_exc:
+    _SUB_PROXY_AVAILABLE = False
+
+def _sub_proxy():
+    if not _SUB_PROXY_AVAILABLE:
+        return None
+    return _get_sub_proxy_manager()
+
+class SubProxyUrlsRequest(BaseModel):
+    urls: List[str] = []
+    names: List[str] = []
+
+@app.get("/api/sub_proxy/status")
+def sub_proxy_status():
+    mgr = _sub_proxy()
+    if mgr is None:
+        return {"ok": False, "error": "proxy module unavailable"}
+    st = mgr.status()
+    # 添加订阅列表详情
+    subs = []
+    for s in mgr.subscriptions:
+        subs.append({"url": s["url"], "name": s["name"], "node_count": -1, "error": ""})
+    st["subscriptions"] = subs
+    st["total_nodes"] = st.get("node_count", 0)
+    return {"ok": True, **st}
+
+@app.post("/api/sub_proxy/add")
+def sub_proxy_add(req: SubProxyUrlsRequest):
+    try:
+        mgr = _sub_proxy()
+        if mgr is None:
+            return {"ok": False, "error": "proxy module unavailable"}
+        added = 0
+        failed = 0
+        for url in req.urls:
+            ok, msg = mgr.add(url)
+            if ok:
+                added += 1
+            else:
+                failed += 1
+        # 添加后自动更新 mihomo 配置
+        if added > 0:
+            try:
+                if mgr.is_running:
+                    mgr.stop()
+                    import time; time.sleep(1)
+                mgr.start()
+            except Exception:
+                pass
+        return {"ok": True, "added": added, "failed": failed, "total": len(mgr.subscriptions)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@app.post("/api/sub_proxy/remove")
+def sub_proxy_remove(req: dict = Body(None)):
+    mgr = _sub_proxy()
+    if mgr is None:
+        return {"ok": False, "error": "proxy module unavailable"}
+    url = (req or {}).get("url", "")
+    if not url:
+        return {"ok": False, "error": "url required"}
+    ok, msg = mgr.remove(url)
+    return {"ok": ok, "message": msg}
+
+@app.post("/api/sub_proxy/clear")
+def sub_proxy_clear():
+    mgr = _sub_proxy()
+    if mgr is None:
+        return {"ok": False, "error": "proxy module unavailable"}
+    mgr.clear()
+    return {"ok": True, "message": "cleared"}
+
+@app.post("/api/sub_proxy/start")
+def sub_proxy_start():
+    mgr = _sub_proxy()
+    if mgr is None:
+        return {"ok": False, "error": "proxy module unavailable"}
+    ok, msg = mgr.start()
+    return {"ok": ok, "message": msg, "proxy_url": mgr.proxy_url if ok else ""}
+
+@app.post("/api/sub_proxy/stop")
+def sub_proxy_stop():
+    mgr = _sub_proxy()
+    if mgr is None:
+        return {"ok": False, "error": "proxy module unavailable"}
+    result = mgr.stop()
+    if result is None:
+        return {"ok": True, "message": "proxy stopped"}
+    ok, msg = result
+    return {"ok": ok, "message": msg}
+
+@app.post("/api/sub_proxy/refresh")
+def sub_proxy_refresh():
+    mgr = _sub_proxy()
+    if mgr is None:
+        return {"ok": False, "error": "proxy module unavailable"}
+    # 重新更新配置并重启
+    ok, msg = mgr.stop()
+    ok2, msg2 = mgr.start()
+    return {"ok": ok2, "message": f"重启: {msg}; {msg2}"}
+
+@app.get("/api/sub_proxy/test")
+def sub_proxy_test():
+    mgr = _sub_proxy()
+    if mgr is None:
+        return {"ok": False, "error": "proxy module unavailable"}
+    result = mgr.test_proxy()
+    return {"ok": result.get("ok", False), **result}
+
+@app.get("/api/sub_proxy/nodes")
+def sub_proxy_nodes():
+    mgr = _sub_proxy()
+    if mgr is None:
+        return {"ok": False, "nodes": [], "error": "proxy module unavailable"}
+    nodes = mgr.get_nodes()
+    return {"ok": True, "nodes": nodes, "count": len(nodes)}
+
+@app.post("/api/sub_proxy/rotate")
+def sub_proxy_rotate():
+    mgr = _sub_proxy()
+    if mgr is None:
+        return {"ok": False, "message": "proxy module unavailable"}
+    return mgr.rotate_node()
+
+@app.post("/api/sub_proxy/find_alive")
+def sub_proxy_find_alive():
+    mgr = _sub_proxy()
+    if mgr is None:
+        return {"ok": False, "message": "proxy module unavailable"}
+    ok, msg = mgr.find_alive_node()
+    return {"ok": ok, "message": msg}
+
+@app.get("/api/sub_proxy/nodes")
+def sub_proxy_nodes():
+    mgr = _sub_proxy()
+    if mgr is None:
+        return {"ok": False, "error": "proxy module unavailable"}
+    nodes = mgr.get_nodes()
+    return {"ok": True, "nodes": nodes, "count": len(nodes)}
+
+@app.post("/api/sub_proxy/switch")
+def sub_proxy_switch(req: dict = Body(None)):
+    mgr = _sub_proxy()
+    if mgr is None:
+        return {"ok": False, "message": "proxy module unavailable"}
+    node_name = (req or {}).get("name", "")
+    if not node_name:
+        return {"ok": False, "message": "节点名称不能为空"}
+    ok, msg = mgr.switch_to_node(node_name)
+    return {"ok": ok, "message": msg}
+
+
+def _kill_port_occupants(port: int):
+    """自动杀掉占用指定端口的旧进程，等待端口释放"""
+    import subprocess, socket
+    killed = False
+    for _ in range(3):  # 最多重试 3 轮
+        try:
+            out = subprocess.check_output(
+                f'netstat -aon | findstr ":{port} " | findstr "LISTENING"',
+                shell=True, text=True, stderr=subprocess.DEVNULL
+            )
+        except subprocess.CalledProcessError:
+            break  # 端口没被占用
+        pids = set()
+        for line in out.strip().splitlines():
+            parts = line.split()
+            if len(parts) >= 5:
+                pid = parts[-1]
+                if pid != "0":
+                    pids.add(pid)
+        if not pids:
+            break
+        for pid in pids:
+            try:
+                subprocess.run(["taskkill", "/PID", pid, "/F"],
+                               capture_output=True, timeout=5)
+                print(f"[CLEANUP] 已清理端口 {port} 上的旧进程 PID={pid}")
+                killed = True
+            except Exception:
+                pass
+        time.sleep(1)
+    if killed:
+        # 等端口真正释放
+        for _ in range(10):
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1)
+                s.connect(("127.0.0.1", port))
+                s.close()
+                time.sleep(0.5)
+            except Exception:
+                break  # 端口已释放
+
+
 if __name__ == "__main__":
     import uvicorn
+    _kill_port_occupants(PORT)
     uvicorn.run(app, host="0.0.0.0", port=PORT)

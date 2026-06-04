@@ -45,8 +45,7 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ──
 SIGNUP_URL = "https://signup.live.com/signup"
-MANUAL_CAPTCHA_TIMEOUT = 600  # 10 min for manual CAPTCHA (visible mode)
-MANUAL_CAPTCHA_TIMEOUT_HEADLESS = 15  # 15s for headless (can't manually solve)
+MANUAL_CAPTCHA_TIMEOUT = 600  # 10 min for manual CAPTCHA
 _captcha_force_skip = False
 _registration_paused = False
 _registration_stop = False
@@ -55,56 +54,10 @@ _current_reg_steps = {}  # 线程级步骤跟踪 {thread_id: step}，支持并�
 _active_browsers = {}  # 线程安全的浏览器实例字典 {thread_id: browser}
 _active_browsers_lock = threading.Lock()  # 保护 _active_browsers 的锁
 
-# ── 并发安全: 线程级控制状态 ──
-# 全局变量在并发时所有线程共享，导致一个线程停止/暂停影响所有线程
-# 现在改为线程级存储，每个线程独立控制
-_thread_states = {}  # {thread_id: {"paused": bool, "stop": bool, "captcha_skip": bool}}
-_thread_states_lock = threading.Lock()
-
-
-def reset_all_states():
-    """重置所有控制状态（全局变量+线程状态字典），用于新注册任务启动前清理残留。
-    解决：上次任务点停止后，残留的 stop=True 导致新任务立即退出浏览器的问题。
-    """
-    global _captcha_force_skip, _registration_paused, _registration_stop, _current_reg_step
-    _captcha_force_skip = False
-    _registration_paused = False
-    _registration_stop = False
-    _current_reg_step = ""
-    with _thread_states_lock:
-        _thread_states.clear()
-    with _active_browsers_lock:
-        _current_reg_steps.clear()
-    logger.info("[CDP] 所有控制状态已重置（全局变量+线程状态已清空）")
-
-
-def _get_thread_state() -> dict:
-    """获取当前线程的控制状态（不存在则初始化）"""
-    tid = threading.current_thread().ident
-    with _thread_states_lock:
-        if tid not in _thread_states:
-            _thread_states[tid] = {"paused": False, "stop": False, "captcha_skip": False}
-        return _thread_states[tid]
-
-
-def _clear_thread_state():
-    """清理当前线程的控制状态"""
-    tid = threading.current_thread().ident
-    with _thread_states_lock:
-        _thread_states.pop(tid, None)
-
 def set_registration_paused(val=True):
-    """设置当前线程的暂停状态（并发安全）"""
-    state = _get_thread_state()
-    state["paused"] = val
-    # 同时保留全局变量兼容性（单线程模式）
     global _registration_paused; _registration_paused = val
 
 def set_registration_stop(val=True):
-    """设置当前线程的停止状态（并发安全），并关闭浏览器"""
-    state = _get_thread_state()
-    state["stop"] = val
-    # 同时保留全局变量兼容性（单线程模式）
     global _registration_stop; _registration_stop = val
     # 立即尝试关闭所有活跃的浏览器，加速停止
     if val:
@@ -152,47 +105,30 @@ def stop_registration_browser():
 
 def _check_pause_or_stop(step=""):
     """检查暂停/停止。暂停时阻塞直到恢复，返回后调用者应重新检测页面状态。
-    并发安全: 优先读取线程级状态，回退到全局状态。
     返回: False=继续, True=应停止"""
     global _registration_paused, _registration_stop, _captcha_force_skip, _current_reg_step
     _current_reg_step = step
     # 同时更新线程级步骤跟踪
     tid = threading.current_thread().ident
     _current_reg_steps[tid] = step
-    # ── 并发安全: 优先读取线程级状态 ──
-    state = _get_thread_state()
-    should_stop = state.get("stop", False) or _registration_stop
-    should_pause = state.get("paused", False) or _registration_paused
-    should_skip = state.get("captcha_skip", False) or _captcha_force_skip
-    if should_stop:
+    if _registration_stop:
         return True
-    if not should_pause:
+    if not _registration_paused:
         return False
     # 已暂停 → 阻塞等待恢复
     logger.info("[PAUSE] ⏸ 已暂停在步骤: %s，等待继续...", step)
-    while True:
-        state = _get_thread_state()
-        should_pause = state.get("paused", False) or _registration_paused
-        should_stop = state.get("stop", False) or _registration_stop
-        should_skip = state.get("captcha_skip", False) or _captcha_force_skip
-        if not should_pause:
-            break
-        if should_stop:
-            return True
-        if should_skip:
-            break
+    while _registration_paused:
         time.sleep(0.5)
+        if _registration_stop: return True
+        if _captcha_force_skip: break
     # 已恢复 → 返回 False，调用者应重新检测页面状态
     logger.info("[PAUSE] ▶ 已恢复，将重新检测页面状态继续")
     return False
 
 
 def set_captcha_force_skip(value=True):
-    """设置当前线程的验证码跳过状态（并发安全）"""
-    state = _get_thread_state()
-    state["captcha_skip"] = value
-    # 同时保留全局变量兼容性（单线程模式）
-    global _captcha_force_skip; _captcha_force_skip = value
+    global _captcha_force_skip
+    _captcha_force_skip = value
 AUTO_CAPTCHA_TIMEOUT = 120    # 2 min for auto CAPTCHA attempt
 
 # ── Field Selectors (mirrored from browser_extension/content/outlook-signup.js) ──
@@ -466,12 +402,11 @@ def _check_page_advanced(browser: CDPBrowser) -> str | None:
     Returns state string or None if still on CAPTCHA/loading."""
     url = browser.get_url().lower()
     body = browser.get_body_text().lower()
-    body_len = len(body)
     for state, markers in POST_CHALLENGE_MARKERS.items():
         for marker in markers:
             if marker in body or marker in url:
                 if state in ("privacy_notice", "account_notice", "stay_signed_in",
-                             "add_recovery", "passkey_prompt", "success", "microsoft_problem"):
+                             "add_recovery", "passkey_prompt", "success"):
                     return state
     # 排除 login.microsoft.com，因为那是登录页面，不是账户主页
     is_login_page = "login.microsoft.com" in url or "login.live.com" in url
@@ -479,16 +414,14 @@ def _check_page_advanced(browser: CDPBrowser) -> str | None:
         return "account_home"
     if any(kw in body for kw in ["\u88ab\u963b\u6b62", "blocked", "\u5f02\u5e38\u6d3b\u52a8"]):
         return "blocked"
-    # ── 修复: body 为空时不返回 fill 状态，避免 SPA 未渲染时误判 ──
-    if body_len >= 50:
-        for field_type in ("username", "password", "first_name", "birth_month", "birth_year"):
-            for selector in FIELD_SELECTORS.get(field_type, []):
-                try:
-                    nid = browser.query_selector(selector)
-                    if nid and browser.is_element_visible(nid):
-                        return "fill_" + field_type
-                except Exception:
-                    continue
+    for field_type in ("username", "password", "first_name", "birth_month", "birth_year"):
+        for selector in FIELD_SELECTORS.get(field_type, []):
+            try:
+                nid = browser.query_selector(selector)
+                if nid and browser.is_element_visible(nid):
+                    return "fill_" + field_type
+            except Exception:
+                continue
     has_form = browser.evaluate("""(() => {
         const inputs = document.querySelectorAll('input[type=text], input[type=email], input[type=password], input[type=number], select');
         for (const el of inputs) { if (el.offsetParent !== null && el.offsetWidth > 50) return true; }
@@ -501,17 +434,13 @@ def _check_page_advanced(browser: CDPBrowser) -> str | None:
 def _detect_page_state(browser: CDPBrowser) -> str:
     url = browser.get_url().lower()
     body = browser.get_body_text().lower()
-    body_len = len(body)
 
     # \u2500\u2500 Chrome \u9519\u8bef\u9875\u68c0\u6d4b\uff08\u4ee3\u7406\u4e0d\u901a/\u7f51\u7edc\u9519\u8bef\uff09\u2500\u2500
-    # 排除微软域名上的错误页面（login.live.com/err=... 不是代理错误）
-    is_ms_domain = any(d in url for d in ["login.live.com", "signup.live.com", "account.live.com", "login.microsoft.com", "account.microsoft.com"])
-    # 只用最可靠的指标：chrome-error:// URL 判断代理错误
-    # 不再用 body 文本关键词匹配（微软页面JS代码中常含这些字符串，导致误判关闭浏览器）
-    if "chrome-error" in url:
-        return "proxy_error"
-    # 非微软域名 + body 为空 → 页面未加载
-    if not is_ms_domain and body_len < 10:
+    chrome_errors = ["chrome-error://", "err_connection_reset", "err_socks_connection_failed",
+                     "err_empty_response", "err_network_changed", "err_connection_refused",
+                     "err_timed_out", "err_proxy_connection_failed", "err_tunnel_connection_failed",
+                     "\u65e0\u6cd5\u8bbf\u95ee\u6b64\u7f51\u7ad9", "\u8fde\u63a5\u5df2\u91cd\u7f6e", "\u8be5\u7f51\u9875\u65e0\u6cd5\u6b63\u5e38\u8fd0\u4f5c"]
+    if "chrome-error" in url or any(kw in body for kw in chrome_errors):
         return "proxy_error"
 
     for state, markers in POST_CHALLENGE_MARKERS.items():
@@ -530,17 +459,6 @@ def _detect_page_state(browser: CDPBrowser) -> str:
     # Blocked state
     if any(kw in body for kw in ["\u88ab\u963b\u6b62", "blocked", "\u5f02\u5e38\u6d3b\u52a8", "\u6b64\u5e10\u6237\u5df2\u88ab"]):
         return "blocked"
-    # ── 关键修复: 微软域名 + body 为空 → SPA 未渲染，返回 loading 而非 fill_* ──
-    # signup.live.com 是 SPA，JS 未执行时 body 为空但 input 元素可能已存在于 DOM
-    # 此时不应返回 fill_username，否则会导致无限循环
-    if is_ms_domain and body_len < 50:
-        # 检查 readyState 是否 complete
-        ready = browser.evaluate("document.readyState")
-        if ready == "complete":
-            # DOM complete 但 body 仍为空 → JS 渲染失败，需要刷新
-            return "page_empty"
-        return "loading"
-
     for selector in FIELD_SELECTORS["username"]:
         nid = browser.query_selector(selector)
         if nid and browser.is_element_visible(nid):
@@ -660,10 +578,9 @@ def _handle_hsprotect_captcha(browser: CDPBrowser, timeout: float = AUTO_CAPTCHA
     deadline = time.monotonic() + timeout
     attempt = 0
     
-    try_again_count = 0  # consecutive try-again counter, abort after 3
     while time.monotonic() < deadline:
         attempt += 1
-        if _captcha_force_skip or _get_thread_state().get("captcha_skip", False):
+        if _captcha_force_skip:
             logger.info("[CAPTCHA] Force skip activated, bypassing hsprotect")
             return True
         _pa = _check_page_advanced(browser)
@@ -683,19 +600,6 @@ def _handle_hsprotect_captcha(browser: CDPBrowser, timeout: float = AUTO_CAPTCHA
         ch_type = challenge_info.get("type", "unknown") if challenge_info else "unknown"
         logger.info("[CAPTCHA] Challenge type: %s", ch_type)
         
-
-        # 无可交互元素检测：验证码页面但找不到可点击/拖拽的按钮 → 系统级阻碍
-        if not challenge_info or ch_type == 'unknown':
-            body_lower = browser.get_body_text().lower()
-            _block_keywords = ['遇到问题', '遇到了问题', 'ran into a problem', 'something went wrong',
-                               '帐户创建已被阻止', 'account creation blocked', '创建被阻止',
-                               '请再试一次', 'try again', 'unusual activity', '异常活动']
-            if any(kw in body_lower for kw in _block_keywords):
-                logger.error('[CAPTCHA] No interactable element + blockage keywords detected → system blockage, aborting')
-                return False
-            # 没有阻碍关键词但也找不到按钮，继续尝试
-            logger.info('[CAPTCHA] No interactable element found, but no blockage keywords — will retry')
-
         if ch_type == "press_hold":
             success = _hsprotect_press_hold(browser, challenge_info, attempt)
         elif ch_type == "slider":
@@ -714,11 +618,7 @@ def _handle_hsprotect_captcha(browser: CDPBrowser, timeout: float = AUTO_CAPTCHA
             # Check for "please try again" — means click worked but site rejected
             body_text = browser.get_body_text().lower()
             if any(kw in body_text for kw in ['try again', '再试一次', 'try again later', '请重试']):
-                try_again_count += 1
-                logger.info("[CAPTCHA] Got 'try again' (%d/3) — site rejected the attempt", try_again_count)
-                if try_again_count >= 3:
-                    logger.error("[CAPTCHA] 3 consecutive 'try again' rejections → system blockage detected, aborting")
-                    return False
+                logger.info("[CAPTCHA] Got 'try again' — click was correct, retrying same position...")
                 # Don't sleep long, just retry immediately with same coords
                 time.sleep(2.0)
                 continue
@@ -1160,42 +1060,27 @@ def _hsprotect_unknown(browser: CDPBrowser, attempt: int) -> bool:
     return False
 
 
-def _wait_for_manual_captcha(browser: CDPBrowser, timeout: float = None) -> bool:
+def _wait_for_manual_captcha(browser: CDPBrowser, timeout: float = MANUAL_CAPTCHA_TIMEOUT) -> bool:
     """
     Wait for user to manually solve the CAPTCHA.
     Polls every 3 seconds to check if the challenge is cleared.
     Supports pause: when paused, blocks until resumed then re-checks.
     """
-    if timeout is None:
-        try:
-            timeout = MANUAL_CAPTCHA_TIMEOUT_HEADLESS if browser.config.headless else MANUAL_CAPTCHA_TIMEOUT
-        except Exception:
-            timeout = MANUAL_CAPTCHA_TIMEOUT
     logger.info("[CAPTCHA] Waiting for manual solve (timeout=%.0fs)", timeout)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         time.sleep(3)
-        # ── 并发安全: 读取线程级状态 ──
-        state = _get_thread_state()
-        is_paused = state.get("paused", False) or _registration_paused
-        should_stop = state.get("stop", False) or _registration_stop
-        should_skip = state.get("captcha_skip", False) or _captcha_force_skip
         # 支持暂停：暂停时阻塞，恢复后继续检测
-        if is_paused:
+        if _registration_paused:
             logger.info("[CAPTCHA] ⏸ 暂停中，等待恢复...")
-            while True:
-                state = _get_thread_state()
-                is_paused = state.get("paused", False) or _registration_paused
-                should_stop = state.get("stop", False) or _registration_stop
-                should_skip = state.get("captcha_skip", False) or _captcha_force_skip
-                if not is_paused: break
-                if should_stop: return False
-                if should_skip: return True
+            while _registration_paused:
                 time.sleep(0.5)
+                if _registration_stop: return False
+                if _captcha_force_skip: return True
             logger.info("[CAPTCHA] ▶ 已恢复，继续检测...")
-        if should_stop:
+        if _registration_stop:
             return False
-        if should_skip:
+        if _captcha_force_skip:
             logger.info("[CAPTCHA] Force skip activated, bypassing manual wait")
             return True
         _pa = _check_page_advanced(browser)
@@ -1333,10 +1218,10 @@ def _handle_post_challenge(browser: CDPBrowser, account: OutlookAccount) -> str:
     # Increased from 10 to 40 steps (40 seconds) for slower post-captcha transitions
     for step in range(40):
         # 支持暂停
-        if _registration_stop or _get_thread_state().get("stop", False): return "stopped"
-        while _registration_paused or _get_thread_state().get("paused", False):
+        if _registration_stop: return "stopped"
+        while _registration_paused:
             time.sleep(0.5)
-            if _registration_stop or _get_thread_state().get("stop", False): return "stopped"
+            if _registration_stop: return "stopped"
         state = _detect_page_state(browser)
         logger.info("[POST] Step %d, state: %s", step + 1, state)
         if state == "account_home":
@@ -1405,17 +1290,17 @@ def _handle_post_challenge(browser: CDPBrowser, account: OutlookAccount) -> str:
                 for (const b of submitBtns) {
                     if (isVisible(b)) { b.click(); return 'submit:' + (b.textContent||b.value||'').trim().substring(0,30); }
                 }
-                // 策略4: 点击第一个可见的非取消/非拒绝按钮（隐私偏好页优先"否"）
+                // 策略4: 点击第一个可见的非取消/非拒绝按钮（隐私偏好页优先“否”）
                 const pageText = document.body ? document.body.innerText.toLowerCase() : '';
                 const isYesNoPage = pageText.includes('是否希望') || pageText.includes('是否将') || pageText.includes('隐私偏好');
                 for (const b of btns) {
                     const t = (b.textContent||b.value||'').toLowerCase();
                     if (!isVisible(b)) continue;
                     if (t.includes('cancel') || t.includes('reject') || t.includes('拒绝') || t.includes('close') || t.includes('关闭')) continue;
-                    if (isYesNoPage && (t === '是' || t === 'yes')) continue;  // 跳过"是"按钮
+                    if (isYesNoPage && (t === '是' || t === 'yes')) continue;  // 跳过“是”按钮
                     b.click(); return 'fallback:' + t.trim().substring(0,30);
                 }
-                // 最后兜底：如果只剩"是"按钮
+                // 最后兜底：如果只剩“是”按钮
                 for (const b of btns) {
                     const t = (b.textContent||b.value||'').toLowerCase();
                     if (isVisible(b) && (t === '是' || t === 'yes')) {
@@ -1466,96 +1351,26 @@ def _handle_post_challenge(browser: CDPBrowser, account: OutlookAccount) -> str:
                 return false; })()""")
             time.sleep(3); continue
         if state == "passkey_prompt":
-            logger.info("[POST] passkey_prompt detected, dismissing Windows WebAuthn system dialog...")
-            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # Windows 通行密钥弹窗是系统级弹窗（WebAuthn/Windows Hello），
-            # JS/CDP 完全看不到它，必须用 OS 级按键（SendInput）关闭
-            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # 1. 按 Escape 关闭系统弹窗（最常见有效）
-            os_press_escape()
-            time.sleep(0.5)
-            # 2. Tab 聚焦"取消"按钮 + Enter 点击（某些弹窗 Escape 不生效）
-            os_press_tab()
-            time.sleep(0.3)
-            os_press_enter()
-            time.sleep(0.5)
-            # 3. 再按 Escape 确保关闭
-            os_press_escape()
-            logger.info("[POST] OS-level Escape+Tab+Enter sent to dismiss WebAuthn dialog")
-            time.sleep(1)
-            # 关闭系统弹窗后，再尝试点击网页上的"下一步"/"跳过"按钮
-            clicked = browser.evaluate("""(() => { const btns = document.querySelectorAll('button,a,[role=button],input[type=submit]');
-                for(const b of btns){const t=(b.textContent||b.value||'').toLowerCase().trim();
-                if(t==='next'||t==='下一步'||t==='继续'||t==='sign in'||t==='登录'){b.click();return 'next:'+t.substring(0,30);}}
-                for(const b of btns){const t=(b.textContent||b.value||'').toLowerCase().trim();
-                if(t.includes('skip')||t.includes('not now')||t.includes('暂不')||t.includes('跳过')||t.includes('以后再说')||t.includes('稍后')||t.includes('later')){b.click();return 'skip:'+t.substring(0,30);}}
-                const idBtn = document.getElementById('idSIButton9');
-                if(idBtn){idBtn.click();return 'idSIButton9';}
-                for(const b of btns){const t=(b.textContent||b.value||'').toLowerCase().trim();
-                if(t==='cancel'||t==='close'||t==='取消'||t==='关闭'){b.click();return 'cancel:'+t.substring(0,30);}}
+            logger.info("[POST] passkey_prompt page detected, clicking skip...")
+            clicked = browser.evaluate("""(() => { const btns = document.querySelectorAll('button,a,[role=button]');
+                for(const b of btns){const t=(b.textContent||'').toLowerCase();
+                if(t.includes('skip')||t.includes('not now')||t.includes('暂不')||t.includes('跳过')||t.includes('以后再说')||t.includes('稍后')||t.includes('later')||t.includes('maybe later')){b.click();return t.substring(0,30);}}
+                for(const b of btns){const id=(b.id||'').toLowerCase();
+                if(id.includes('skip')||id.includes('back')||id.includes('cancel')){b.click();return 'id:'+id;}}
                 return null; })()""")
             if clicked:
-                logger.info("[POST] passkey_prompt page button clicked: %s", clicked)
+                logger.info("[POST] passkey_prompt clicked: %s", clicked)
             else:
-                logger.info("[POST] 系统弹窗已关闭，等待页面变化...")
-            time.sleep(3); continue
-
-        # ── Windows 安全中心通行密钥弹窗（OS级对话框） ──
-        # 微软在注册/登录流程中会弹出 OS 级别的"选择保存通行密钥的位置"弹窗
-        body_post = browser.get_body_text().lower()
-        if any(kw in body_post for kw in ["选择保存通行密钥", "windows 安全中心", "windows security",
-                                            "保存通行密钥的位置", "passkey setup"]):
-            logger.info("[POST] 检测到 Windows 安全中心通行密钥弹窗，发送 OS 级按键关闭...")
-            # 同上：系统级弹窗必须用 OS 按键关闭，JS evaluate 无法触及
-            os_press_escape()
-            time.sleep(0.5)
-            os_press_tab()
-            time.sleep(0.3)
-            os_press_enter()
-            time.sleep(0.5)
-            os_press_escape()
-            logger.info("[POST] OS-level Escape+Tab+Enter sent for Windows Security dialog")
-            time.sleep(1)
-            # 关闭弹窗后，尝试点击网页上的按钮继续
-            clicked = browser.evaluate("""(() => {
-                const btns = document.querySelectorAll('button, [role=button], input[type=submit]');
-                for (const b of btns) {
-                    const t = (b.textContent || b.value || '').toLowerCase().trim();
-                    if (!t) continue;
-                    if (t === 'next' || t === '下一步' || t === 'continue' || t === '继续' || t === 'sign in' || t === '登录') {
-                        b.click(); return 'next:' + t;
-                    }
-                }
-                for (const b of btns) {
-                    const t = (b.textContent || b.value || '').toLowerCase().trim();
-                    if (!t) continue;
-                    if (t === '取消' || t === 'cancel' || t === 'close' || t.includes('关闭')) {
-                        b.click(); return 'cancel:' + t;
-                    }
-                    if (t.includes('skip') || t.includes('no thanks') || t.includes('暂不') || t.includes('later')) {
-                        b.click(); return 'fallback:' + t;
-                    }
-                }
-                const idBtn = document.getElementById('idSIButton9');
-                if (idBtn) { idBtn.click(); return 'idSIButton9'; }
-                return null;
-            })()""")
-            if clicked:
-                logger.info("[POST] 通行密钥弹窗已处理: %s", clicked)
-            else:
-                logger.info("[POST] 系统弹窗已关闭，等待页面变化...")
-            time.sleep(3); continue
+                logger.warning("[POST] passkey_prompt: no skip button found")
+            time.sleep(5); continue
         if state == "fill_profile":
-            # 返回主状态机处理，避免在 post_challenge 中重复填写
-            logger.info("[POST] 检测到 fill_profile，返回主状态机处理")
-            return "fill_profile"
-        # ── 关键修复: fill_username/fill_password 应返回主状态机，不应在此处处理 ──
-        if state == "fill_username":
-            logger.info("[POST] 检测到 fill_username，返回主状态机处理")
-            return "fill_username"
-        if state == "fill_password":
-            logger.info("[POST] 检测到 fill_password，返回主状态机处理")
-            return "fill_password"
+            profile_fill_count += 1
+            if profile_fill_count > max_profile_fills:
+                logger.warning("[POST] fill_profile already done %d times, clicking Next instead", profile_fill_count)
+                _click_next(browser)
+                time.sleep(2)
+                continue
+            _fill_profile_fields(browser, account); time.sleep(2); continue
         if state == "blocked":
             logger.error("[POST] Account creation blocked by Microsoft")
             return "blocked"
@@ -1591,13 +1406,7 @@ def _handle_post_challenge(browser: CDPBrowser, account: OutlookAccount) -> str:
         if ready not in ("complete", "interactive"):
             logger.info("[POST] Page still loading (readyState=%s), waiting...", ready)
             time.sleep(2); continue
-
-        # ── 关键修复: body 为空时不盲目点击按钮 ──
-        # signup.live.com 是 SPA，body 为空说明 JS 未渲染，点击按钮无意义
-        if len(body) < 50:
-            logger.info("[POST] Body 为空(长度=%d)，SPA 未渲染，等待3秒...", len(body))
-            time.sleep(3); continue
-
+        
         # If on a Microsoft domain, keep trying (page may be in transition)
         if any(domain in url for domain in ["login.live.com", "signup.live.com", "account.microsoft.com", "outlook.live.com", "live.com"]):
             # Try clicking any obvious next/continue button
@@ -1753,22 +1562,11 @@ def _fill_username(browser: CDPBrowser, account: OutlookAccount) -> bool:
             logger.error("[FILL] Email input rect not found")
             return False
         logger.info("[FILL] Found email input via: %s", used_selector)
-        # Focus the input
-        browser.focus_element(used_selector)
+        # Click to focus
+        browser.click_at(rect["center_x"], rect["center_y"])
         time.sleep(random.uniform(0.2, 0.5))
         # Type full email address
         browser.type_text(account.email, delay_ms=random.randint(40, 80))
-        # Dispatch change event for React
-        escaped_sel = used_selector.replace("'", "\\'")
-        browser.evaluate(f"""
-            (() => {{
-                const el = document.querySelector('{escaped_sel}');
-                if (el) {{
-                    el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                    el.dispatchEvent(new Event('blur', {{bubbles: true}}));
-                }}
-            }})()
-        """)
         time.sleep(random.uniform(0.3, 0.7))
     
     _click_next(browser)
@@ -1787,46 +1585,17 @@ def _fill_username(browser: CDPBrowser, account: OutlookAccount) -> bool:
 
 def _fill_password(browser: CDPBrowser, password: str) -> bool:
     logger.info("[FILL] Filling password: %s", password)
-    element, sel = _find_first_visible(browser, FIELD_SELECTORS["password"])
+    element, _ = _find_first_visible(browser, FIELD_SELECTORS["password"])
     if not element:
         return False
     _type_into_element(browser, element, password)
-    # 确保 React 框架识别到输入值
-    escaped_sel = sel.replace("'", "\\'")
-    browser.evaluate(f"""
-        (() => {{
-            const el = document.querySelector('{escaped_sel}');
-            if (el) {{
-                el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                el.dispatchEvent(new Event('blur', {{bubbles: true}}));
-            }}
-        }})()
-    """)
-    time.sleep(random.uniform(0.5, 1.0))
+    time.sleep(random.uniform(0.3, 0.8))
     _click_next(browser)
     time.sleep(random.uniform(1, 2))
-    ms_error_retries = 0
-    for _ in range(30):  # 15秒等待
-        # 检测 Chrome 是否已崩溃
-        try:
-            browser.get_url()
-        except Exception:
-            logger.warning("[FILL] Chrome 已崩溃，退出等待")
-            return False
+    for _ in range(20):
         state = _detect_page_state(browser)
-        if state in ("fill_profile", "fill_birthdate", "captcha", "privacy_notice",
-                     "account_notice", "stay_signed_in", "add_recovery", "passkey_prompt"):
+        if state in ("fill_profile", "fill_birthdate", "captcha"):
             return True
-        if state == "microsoft_problem":
-            ms_error_retries += 1
-            if ms_error_retries >= 3:
-                logger.warning("[FILL] microsoft_problem 重试 %d 次仍失败,放弃", ms_error_retries)
-                return False
-            logger.info("[FILL] microsoft_problem 页面,等待后重试 (%d/3)", ms_error_retries)
-            time.sleep(3)
-            _click_next(browser)
-            time.sleep(1)
-            continue
         time.sleep(0.5)
     return False
 
@@ -1982,35 +1751,6 @@ def _click_fluent_dropdown_option(browser: CDPBrowser, button_id: str, name_hint
 
 
 def _click_next(browser: CDPBrowser):
-    # \u65b9\u6cd51: JavaScript \u76f4\u63a5\u70b9\u51fb\uff08\u5bf9 React \u5e94\u7528\u66f4\u53ef\u9760\uff09
-    result = browser.evaluate("""(() => {
-        // \u4f18\u5148\u6309 selector \u627e
-        const selectors = ['#nextButton', 'button[type="submit"]', '#idSIButton9', 'button[data-testid="primaryButton"]'];
-        for (const sel of selectors) {
-            const btn = document.querySelector(sel);
-            if (btn && btn.offsetParent !== null && !btn.disabled) {
-                btn.focus();
-                btn.click();
-                return 'js:' + sel;
-            }
-        }
-        // \u518d\u6309\u6587\u672c\u627e
-        const allBtns = document.querySelectorAll('button');
-        for (const btn of allBtns) {
-            const text = (btn.textContent || '').trim().toLowerCase();
-            if ((text === 'next' || text === 'sign in' || text === '\u4e0b\u4e00\u6b65' || text === '\u540c\u610f\u5e76\u7ee7\u7eed') && btn.offsetParent !== null && !btn.disabled) {
-                btn.focus();
-                btn.click();
-                return 'js:text:' + text;
-            }
-        }
-        return false;
-    })()""")
-    if result and result != False:
-        logger.info("[CLICK] Next button via JS: %s", result)
-        return
-
-    # \u65b9\u6cd52: CDP \u9f20\u6807\u4e8b\u4ef6\uff08\u540e\u5907\uff09
     for selector in FIELD_SELECTORS["submit"]:
         try:
             nid = browser.query_selector(selector)
@@ -2018,18 +1758,29 @@ def _click_next(browser: CDPBrowser):
                 rect = browser.get_element_rect(nid)
                 if rect:
                     browser.click_at(rect["center_x"], rect["center_y"])
-                    logger.info("[CLICK] Next button via CDP: %s", selector)
+                    logger.info("[CLICK] Next button via: %s", selector)
                     return
         except Exception:
             continue
-    logger.warning("[CLICK] Next button NOT FOUND by any method")
+    result = browser.evaluate("""(() => {
+        const btns = document.querySelectorAll('button[type="submit"], #nextButton, #idSIButton9, button[data-testid="primaryButton"]');
+        for (const btn of btns) { if (btn.offsetParent !== null) { btn.click(); return 'selector'; } }
+        const allBtns = document.querySelectorAll('button');
+        for (const btn of allBtns) {
+            const text = (btn.textContent || '').trim().toLowerCase();
+            if ((text === 'next' || text === 'sign in' || text === '\u4e0b\u4e00\u6b65' || text === '\u540c\u610f\u5e76\u7ee7\u7eed') && btn.offsetParent !== null) {
+                btn.click(); return 'text:' + text;
+            }
+        }
+        return false;
+    })()""")
+    logger.info("[CLICK] Next button fallback result: %s", result)
 
 
 
-def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-296a70dab67e", timeout=60, password="", proxy_url=""):
+def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-296a70dab67e", timeout=60, password=""):
     """使用 localhost 回调 + PKCE 获取 OAuth refresh_token。
     流程：导航到 OAuth 页（只导航一次）→ 跟随微软自动重定向 → 每页点对按钮 → 捕获 code → 换取 tokens。
-    proxy_url: 用于 token 交换的代理（格式: http://user:pass@host:port 或 http://host:port）
     """
     import base64, hashlib, secrets, socket, socketserver, threading as _thr
     import http.server, urllib.parse, urllib.request
@@ -2103,43 +1854,26 @@ def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-29
         "state": state,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
-        "prompt": "login",  # 使用 login 而非 select_account，配合 login_hint 自动选择账号并确认
+        "prompt": "select_account",
         "login_hint": email,
     })
     oauth_url = f"https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?{oauth_params}"
 
     try:
         # 启动本地回调服务器
-        # 优先尝试 IPv6 双栈监听（[::] 同时接受 IPv4 和 IPv6 连接）
-        # 但 Windows 上 IPv6 双栈不一定可靠，所以用 dual-stack + IPV6_V6ONLY=0
-        httpd = None
         try:
             _DualTCPServer.address_family = socket.AF_INET6
             httpd = _DualTCPServer(("::", port), _CallbackHandler)
-            # 确保 IPv6 双栈模式：同时接受 IPv4 和 IPv6 连接
-            try:
-                httpd.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-            except (AttributeError, OSError):
-                pass
-            logger.info("[RT] 回调服务器监听 IPv6+IPv4 双栈: [::]:%d", port)
-        except Exception as e6:
-            logger.debug("[RT] IPv6 监听失败: %s, 回退到 IPv4", e6)
-            try:
-                httpd = _TCPServer(("127.0.0.1", port), _CallbackHandler)
-                logger.info("[RT] 回调服务器监听 IPv4: 127.0.0.1:%d", port)
-            except Exception as e4:
-                logger.warning("[RT] IPv4 监听也失败: %s, 尝试 0.0.0.0", e4)
-                httpd = _TCPServer(("0.0.0.0", port), _CallbackHandler)
-                logger.info("[RT] 回调服务器监听 0.0.0.0:%d", port)
+            logger.info("[RT] 回调服务器监听 IPv6+IPv4: [::]:%d", port)
+        except Exception:
+            httpd = _TCPServer(("127.0.0.1", port), _CallbackHandler)
+            logger.info("[RT] 回调服务器监听 IPv4: 127.0.0.1:%d", port)
         httpd.oauth_code = None
         httpd.oauth_state = None
         httpd.oauth_error = None
         httpd.oauth_error_description = None
         def _serve_requests(srv):
-            """处理回调请求，最多等待 timeout 秒"""
-            srv.timeout = 2.0
-            deadline_serve = time.time() + timeout
-            while time.time() < deadline_serve:
+            for _ in range(5):
                 if srv.oauth_code or srv.oauth_error:
                     break
                 try:
@@ -2153,87 +1887,23 @@ def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-29
         # 唯一一次导航，之后全部跟随微软自动重定向
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         logger.info("[RT] 导航到 OAuth 授权页: %s", email)
-        
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # 关键修复：用 CDP Network.setProxyOverride 确保本地回调直连
-        # 问题：Chrome 用 --proxy-server 时，即使有 --proxy-bypass-list=<-loopback>，
-        #        localhost 回调仍可能被代理拦截导致 502
-        # 方案：通过 CDP 动态设置代理规则，显式将 localhost/127.0.0.1 排除在代理之外
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        _cdp_redirect_code = None  # 从 CDP 拦截到的 auth code
-        _original_proxy_config = None  # 保存原始代理配置以便恢复
-        try:
-            browser.evaluate("undefined")  # warm up
-            browser._send_cmd("Network.enable", {})
-            logger.info("[RT] CDP Network 域已启用")
-
-            # ── 用 Network.setProxyOverride 确保本地回调绕过代理 ──
-            # 获取当前浏览器的代理配置（来自 --proxy-server 启动参数）
-            try:
-                proxy_result = browser._send_cmd("Network.getProxySettings", {})
-                _original_proxy_config = proxy_result
-                logger.info("[RT] 当前代理配置: %s", proxy_result)
-            except Exception:
-                logger.debug("[RT] 无法获取当前代理配置（可能无代理）")
-
-            # 设置代理绕过规则：所有外部流量走代理，localhost/127.0.0.1 直连
-            try:
-                bypass_rules = [
-                    "localhost",
-                    "127.0.0.1",
-                    "::1",
-                    f"localhost:{port}",
-                    f"127.0.0.1:{port}",
-                    "<-loopback>",
-                ]
-                browser._send_cmd("Network.setProxyOverride", {
-                    "bypassRules": bypass_rules,
-                })
-                logger.info("[RT] 已设置代理绕过规则: %s（确保本地回调直连）", bypass_rules)
-            except Exception as proxy_err:
-                logger.warning("[RT] Network.setProxyOverride 失败（旧版 Chrome 可能不支持）: %s", proxy_err)
-                # 备选方案：尝试用 Page.setBypassCSP 等方式，或继续用 CDP 事件拦截
-
-            # ── 注册 Network.requestWillBeSent 事件处理器，拦截 localhost 回调重定向 ──
-            # 双保险：即使代理绕过成功，也保留 CDP 事件拦截作为备用
-            def _on_network_request(event):
-                nonlocal _cdp_redirect_code
-                try:
-                    params = event.get("params", {})
-                    req_url = params.get("request", {}).get("url", "")
-                    if ("localhost" in req_url or "127.0.0.1" in req_url) and "code=" in req_url:
-                        logger.info("[RT] CDP 拦截到 localhost 回调: %s", req_url[:200])
-                        parsed = urllib.parse.urlparse(req_url)
-                        qs = urllib.parse.parse_qs(parsed.query)
-                        code = qs.get("code", [None])[0]
-                        if code:
-                            _cdp_redirect_code = code
-                            logger.info("[RT] CDP 拦截到 auth code: %s...", code[:20])
-                except Exception:
-                    pass
-            browser._event_handlers.setdefault("Network.requestWillBeSent", []).append(_on_network_request)
-        except Exception as cdp_err:
-            logger.warning("[RT] CDP Network 域启用失败（将回退到 URL 检测）: %s", cdp_err)
-        
         browser.navigate(oauth_url, wait_for_load=True, timeout=30)
         time.sleep(3)
 
         # 主循环：跟随微软自动重定向，每页识别并点击
-        # 同时通过 CDP Network 事件拦截 localhost 回调重定向
         deadline = time.time() + timeout
-        while time.time() < deadline and not httpd.oauth_code and not httpd.oauth_error and not _cdp_redirect_code:
-            if _registration_stop or _get_thread_state().get("stop", False):
+        while time.time() < deadline and not httpd.oauth_code and not httpd.oauth_error:
+            if _registration_stop:
                 logger.info("[RT] 检测到停止标志，退出")
                 httpd.server_close()
                 return ""
 
             url = browser.get_url()
-            url_lower = url.lower()
             body = browser.get_body_text().lower()
             logger.info("[RT] 页面: URL=%s body_len=%d", url[:120], len(body))
 
             # ── 1. callback: code 已到 ──
-            if "/callback" in url_lower or "code=" in url_lower:
+            if "/callback" in url or "code=" in url:
                 logger.info("[RT] 检测到 callback 重定向，提取 code...")
                 try:
                     parsed = urllib.parse.urlparse(url)
@@ -2247,16 +1917,8 @@ def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-29
                 except Exception:
                     pass
 
-            # ── 2. 账号选择页（主线第1步）：检测账号磁贴 ──
-            # 必须严格检测：URL 包含登录域名 + 页面有明确的账号选择特征
-            is_account_picker = False
-            if ("login.live.com" in url_lower or "login.microsoftonline.com" in url_lower) and "error" not in body and "invalid_request" not in body:
-                # 严格检测：必须有账号选择的关键词或 data-email 属性
-                if any(kw in body for kw in ["pick an account", "choose account", "选择帐户", "选择账户", "pick account", "sign in with"]):
-                    is_account_picker = True
-                elif browser.evaluate('(() => document.querySelectorAll("[data-email], [data-upn]").length > 0)()'):
-                    is_account_picker = True
-            if is_account_picker:
+            # ── 2. 账号选择页（主线第1步）：login.live.com + 非错误页 ──
+            if "login.live.com" in url and "error" not in body and "invalid_request" not in body:
                 logger.info("[RT] 账号选择页，点击已登录账号: %s", email)
                 email_prefix = email.split('@')[0].lower()
                 pos = browser.evaluate(
@@ -2303,173 +1965,15 @@ def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-29
                 time.sleep(3)
                 continue
 
-            # ── 2.5. 密码输入页：微软可能要求重新输入密码确认身份 ──
-            if ("login.live.com" in url_lower or "login.microsoftonline.com" in url_lower) and password:
-                # 检测是否有密码输入框
-                has_password_field = browser.evaluate("""(() => {
-                    const inputs = document.querySelectorAll('input[type="password"]');
-                    for (const inp of inputs) {
-                        if (inp.offsetParent !== null && inp.offsetWidth > 30) return true;
-                    }
-                    return false;
-                })()""")
-                if has_password_field:
-                    logger.info("[RT] 检测到密码输入页，输入密码并点击下一步...")
-                    # 先等待页面完全加载（body_len 太小说明还没加载完）
-                    page_ready = browser.evaluate("document.readyState") == "complete"
-                    if not page_ready:
-                        time.sleep(2)
-                    # 策略: JS native setter 填密码 + 触发 React 事件 + 点击 Sign in/Next 按钮
-                    fill_result = browser.evaluate(f"""(() => {{
-                        const inputs = document.querySelectorAll('input[type="password"]');
-                        let filled = false;
-                        for (const inp of inputs) {{
-                            if (inp.offsetParent !== null && inp.offsetWidth > 30) {{
-                                inp.scrollIntoView({{block: 'center'}});
-                                inp.focus();
-                                // 清空已有值
-                                inp.value = '';
-                                // 使用 native setter 以触发 React onChange
-                                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                                nativeInputValueSetter.call(inp, '{password.replace("'", "\\'")}');
-                                inp.dispatchEvent(new Event('input', {{bubbles: true}}));
-                                inp.dispatchEvent(new Event('change', {{bubbles: true}}));
-                                filled = true;
-                                break;
-                            }}
-                        }}
-                        if (!filled) return 'no_visible_input';
-                        // 点击 Sign in / Next / 登录 / 下一步 按钮
-                        const btns = document.querySelectorAll('button, input[type=submit], [role=button]');
-                        for (const b of btns) {{
-                            const t = (b.textContent || b.value || '').toLowerCase().trim();
-                            if (!t) continue;
-                            if (t.includes('sign in') || t.includes('next') || t.includes('登录') || t.includes('下一步')) {{
-                                b.click(); return 'btn:' + t.substring(0,30);
-                            }}
-                        }}
-                        // 兜底：尝试 idSIButton9（微软标准按钮）
-                        const idBtn = document.getElementById('idSIButton9');
-                        if (idBtn) {{ idBtn.click(); return 'idSIButton9'; }}
-                        return 'filled_no_btn';
-                    }})()""")
-                    logger.info("[RT] 密码输入+按钮点击结果: %s", fill_result)
-                    # 验证密码是否真的填入了
-                    pwd_check = browser.evaluate("""(() => {
-                        const inputs = document.querySelectorAll('input[type="password"]');
-                        for (const inp of inputs) {
-                            if (inp.offsetParent !== null && inp.offsetWidth > 30) return inp.value.length;
-                        }
-                        return -1;
-                    })()""")
-                    if pwd_check == 0:
-                        logger.warning("[RT] 密码值为空！native setter 可能未生效，尝试 CDP insertText")
-                        # 用 CDP insertText 作为备选
-                        try:
-                            browser.evaluate("""(() => {
-                                const inputs = document.querySelectorAll('input[type="password"]');
-                                for (const inp of inputs) {
-                                    if (inp.offsetParent !== null && inp.offsetWidth > 30) {
-                                        inp.focus(); return true;
-                                    }
-                                }
-                                return false;
-                            })()""")
-                            time.sleep(0.3)
-                            browser._send_cmd("Input.insertText", {"text": password})
-                            time.sleep(0.5)
-                            # 再次点击按钮
-                            browser.evaluate("""(() => {
-                                const btns = document.querySelectorAll('button, input[type=submit], [role=button]');
-                                for (const b of btns) {
-                                    const t = (b.textContent || b.value || '').toLowerCase().trim();
-                                    if (t.includes('sign in') || t.includes('next') || t.includes('登录') || t.includes('下一步')) {
-                                        b.click(); return t;
-                                    }
-                                }
-                                const idBtn = document.getElementById('idSIButton9');
-                                if (idBtn) { idBtn.click(); return 'idSIButton9'; }
-                                return null;
-                            })()""")
-                        except Exception:
-                            pass
-                    if fill_result == 'filled_no_btn':
-                        # 没找到按钮，用 CDP Enter 提交
-                        try:
-                            browser._send_cmd("Input.dispatchKeyEvent", {
-                                "type": "keyDown", "key": "Enter", "code": "Enter",
-                                "windowsVirtualKeyCode": 13
-                            })
-                            browser._send_cmd("Input.dispatchKeyEvent", {
-                                "type": "keyUp", "key": "Enter", "code": "Enter",
-                                "windowsVirtualKeyCode": 13
-                            })
-                            logger.info("[RT] 密码已填入，用 CDP Enter 提交")
-                        except Exception:
-                            pass
-                    time.sleep(3)
-                    continue
-
-            # ── 2.7 Windows 安全中心通行密钥弹窗 ──
-            # 微软 OAuth 流程中会弹出 "Windows 安全中心 - 选择保存通行密钥的位置"
-            # 不是必须关闭弹窗，直接点击页面上的"下一步"即可跳过
-            if any(kw in body for kw in ["选择保存通行密钥", "windows 安全中心", "windows security", "保存通行密钥",
-                                           "passkey setup", "passkey creation"]):
-                logger.info("[RT] 检测到 Windows 安全中心/通行密钥弹窗，点击下一步跳过...")
-                dismissed = browser.evaluate("""(() => {
-                    const btns = document.querySelectorAll('button, [role=button], input[type=submit]');
-                    // 优先点击"下一步"继续流程
-                    for (const b of btns) {
-                        const t = (b.textContent || b.value || '').toLowerCase().trim();
-                        if (!t) continue;
-                        if (t === 'next' || t === '下一步' || t === 'continue' || t === '继续' || t === 'sign in' || t === '登录') {
-                            b.click(); return 'next:' + t;
-                        }
-                    }
-                    // idSIButton9
-                    const idBtn = document.getElementById('idSIButton9');
-                    if (idBtn) { idBtn.click(); return 'idSIButton9'; }
-                    // 其次找取消/关闭按钮
-                    for (const b of btns) {
-                        const t = (b.textContent || b.value || '').toLowerCase().trim();
-                        if (!t) continue;
-                        if (t === '取消' || t === 'cancel' || t === 'close' || t.includes('关闭')) {
-                            b.click(); return 'cancel:' + t;
-                        }
-                    }
-                    // 兜底：找任何看起来像跳过的按钮
-                    for (const b of btns) {
-                        const t = (b.textContent || b.value || '').toLowerCase().trim();
-                        if (t.includes('skip') || t.includes('no thanks') || t.includes('暂不') || t.includes('later')) {
-                            b.click(); return 'fallback:' + t;
-                        }
-                    }
-                    return null;
-                })()""")
-                if dismissed:
-                    logger.info("[RT] 通行密钥弹窗已处理: %s", dismissed)
-                else:
-                    logger.warning("[RT] 通行密钥弹窗未找到按钮，等待页面变化...")
-                time.sleep(3)
-                continue
-
-            # ── 3. Consent/Update/OAuth 授权确认页（主线第2步）：URL + body 检测 ──
-            # 注意: URL 中的 Consent/Update 首字母大写，必须用 .lower() 比较
-            is_consent_url = "account.live.com/consent" in url_lower or ("login.microsoftonline.com" in url_lower and ("/consent" in url_lower or "/authorize" in url_lower))
-            is_consent_body = any(kw in body for kw in ["microsoft graph command line tools", "permission", "permissions requested", "请求的权限", "已授予访问权限"])
-            if is_consent_url or ("login.microsoftonline.com" in url_lower and is_consent_body):
-                logger.info("[RT] Consent/OAuth 权限页面，点击确认... URL=%s", url[:120])
+            # ── 3. Consent/Update 授权确认页（主线第2步）：URL 检测 ──
+            if "account.live.com/consent" in url:
+                logger.info("[RT] Consent/Update 页面，点击确认...")
                 clicked = browser.evaluate("""(() => {
                     function _vis(el) {
                         if (!el) return false;
                         const s = window.getComputedStyle(el);
                         if (s.display==='none'||s.visibility==='hidden'||Number(s.opacity||1)===0) return false;
                         return el.offsetWidth>0||el.offsetHeight>0||el.getClientRects().length>0;
-                    }
-                    // 优先尝试 idBtn_Accept（OAuth 权限同意页的标准按钮）
-                    for (const id of ['idBtn_Accept','idSIButton9','acceptButton','nextButton','primaryButton']) {
-                        const el = document.getElementById(id);
-                        if (el && _vis(el)) { el.click(); return 'consent-id:' + id; }
                     }
                     const btns = document.querySelectorAll('button, input[type=submit], [role=button]');
                     for (const b of btns) {
@@ -2480,6 +1984,10 @@ def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-29
                             t.includes('确认')||t.includes('同意')||t.includes('接受')||t.includes('继续')||t.includes('下一步'))
                         { b.click(); return 'consent:' + t.substring(0,30); }
                     }
+                    for (const id of ['idSIButton9','acceptButton','nextButton','primaryButton']) {
+                        const el = document.getElementById(id);
+                        if (el && _vis(el)) { el.click(); return 'consent-id:' + id; }
+                    }
                     return null;
                 })()""")
                 if clicked:
@@ -2489,35 +1997,13 @@ def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-29
                 time.sleep(3)
                 continue
 
-            # ── 4. "是否保持登录"（主线第3步）：URL / body 检测，点"是" ──
-            is_kmsi_url = "/kmsi" in url_lower
-            is_kmsi_body = "keepsignin" in body.replace(" ", "") or "stay signed" in body or "保持登录" in body
-            if is_kmsi_url or is_kmsi_body:
-                logger.info("[RT] 保持登录页面（kmsi），点击'是' URL=%s", url[:120])
-                clicked_kmsi = browser.evaluate("""(() => {
-                    // 优先 idSIButton9（微软标准 KMSI 按钮）
-                    const btn9 = document.getElementById('idSIButton9');
-                    if (btn9) { btn9.click(); return 'idSIButton9'; }
-                    // 回退：查找包含"是"/"Yes"的按钮
-                    const btns = document.querySelectorAll('button, input[type=submit], [role=button]');
-                    for (const b of btns) {
-                        const t = (b.textContent || b.value || '').toLowerCase().trim();
-                        if (t==='yes' || t==='是' || t.includes('stay signed') || t.includes('保持登录'))
-                        { b.click(); return 'text:' + t.substring(0,20); }
-                    }
-                    // 最后兜底：点任何肯定性按钮
-                    for (const b of btns) {
-                        const t = (b.textContent || b.value || '').toLowerCase().trim();
-                        if (t.includes('accept')||t.includes('agree')||t.includes('continue')||t.includes('ok')||
-                            t.includes('确认')||t.includes('同意')||t.includes('接受')||t.includes('继续'))
-                        { b.click(); return 'fallback:' + t.substring(0,20); }
-                    }
-                    return null;
-                })()""")
-                if clicked_kmsi:
-                    logger.info("[RT] KMSI 已点击: %s", clicked_kmsi)
-                else:
-                    logger.warning("[RT] KMSI 未找到可点击按钮")
+            # ── 4. "是否保持登录"（主线第3步）：点"是" ──
+            if "keepsignin" in body.replace(" ", "") or "stay signed" in body or "保持登录" in body:
+                logger.info("[RT] 保持登录页面，点击'是'")
+                browser.evaluate(
+                    '(() => { const btn = document.getElementById("idSIButton9");'
+                    ' if (btn) { btn.click(); return "yes"; } return null; })()'
+                )
                 time.sleep(3)
                 continue
 
@@ -2574,46 +2060,10 @@ def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-29
                 time.sleep(3)
                 continue
 
-            # ── 9a. OAuth 严重错误页：真正的不可恢复错误 ──
-            # 注意：interaction_required 只是微软要求交互确认，不是错误，不应在此处退出
-            # access_denied 可能是临时问题，先重试
-            if any(kw in body for kw in ['could not complete', 'unable to complete', 'cannot complete', 'couldn\'t complete',
-                                           '无法完成', '请求出错']):
-                # 检查 URL 中是否有真正的错误码
-                try:
-                    parsed = urllib.parse.urlparse(url)
-                    params = urllib.parse.parse_qs(parsed.query)
-                    err = params.get('error', [None])[0]
-                    if err in ('invalid_request', 'unauthorized_client', 'unsupported_response_type', 'server_error'):
-                        logger.error('[RT] OAuth 严重错误: %s - %s', err, params.get('error_description', [None])[0])
-                        httpd.server_close()
-                        return ''
-                except Exception:
-                    pass
-                logger.warning('[RT] OAuth 可能的错误页面，等待重试... URL=%s', url[:120])
-                time.sleep(3)
-                continue
-
             # ── 9. 授权失败 → 等待（微软可能自动重试） ──
             if "授权失败" in body or "authorization failed" in body:
                 logger.warning("[RT] 授权失败页面，等待自动重试...")
                 time.sleep(3)
-                continue
-
-            # ── 9b. chrome-error 页面：网络错误导致页面无法加载 ──
-            if "chromewebdata" in url_lower:
-                # 如果 CDP 已经拦截到了 code，直接退出循环
-                if _cdp_redirect_code:
-                    logger.info("[RT] chrome-error 页面但已拦截到 code，退出循环")
-                    break
-                # 否则等一会再重新导航（Accept 可能已点击，重定向中 502）
-                logger.warning("[RT] 检测到 chrome-error 页面（网络错误），3s 后重新导航到 OAuth URL")
-                time.sleep(3)
-                try:
-                    browser.navigate(oauth_url, wait_for_load=True, timeout=20)
-                except Exception:
-                    pass
-                time.sleep(2)
                 continue
 
             # ── 10. 未识别 → 等页面加载，点任何可用按钮 ──
@@ -2641,10 +2091,9 @@ def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-29
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 循环结束，处理结果
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # 优先使用 CDP 拦截到的 code（不依赖浏览器页面加载成功）
-        code = _cdp_redirect_code or httpd.oauth_code
-        error = httpd.oauth_error if not _cdp_redirect_code else None
-        error_desc = getattr(httpd, 'oauth_error_description', None) if not _cdp_redirect_code else None
+        code = httpd.oauth_code
+        error = httpd.oauth_error
+        error_desc = getattr(httpd, 'oauth_error_description', None)
         httpd.server_close()
 
         if error:
@@ -2673,31 +2122,13 @@ def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-29
             "scope": scopes,
             "code_verifier": code_verifier,
         }).encode()
-        token_url = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
         req = urllib.request.Request(
-            token_url,
+            "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
             data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
 
-        # 如果有代理，通过代理发送 token 交换请求
-        opener = None
-        if proxy_url:
-            try:
-                proxy_handler = urllib.request.ProxyHandler({
-                    "http": proxy_url,
-                    "https": proxy_url,
-                })
-                opener = urllib.request.build_opener(proxy_handler)
-                logger.info("[RT] Token 交换使用代理: %s", proxy_url[:50])
-            except Exception as proxy_err:
-                logger.warning("[RT] 代理设置失败，直连: %s", proxy_err)
-
-        try:
-            if opener:
-                resp = opener.open(req, timeout=15)
-            else:
-                resp = urllib.request.urlopen(req, timeout=15)
+        with urllib.request.urlopen(req, timeout=15) as resp:
             tokens = json.loads(resp.read())
             rt = tokens.get("refresh_token", "")
             if rt:
@@ -2705,26 +2136,6 @@ def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-29
             else:
                 logger.warning("[RT] token 响应中无 refresh_token")
             return rt
-        except Exception as token_err:
-            # 如果直连失败且有代理，尝试用代理重试
-            if not opener and proxy_url:
-                logger.warning("[RT] 直连 token 交换失败: %s，尝试用代理重试", token_err)
-                try:
-                    proxy_handler = urllib.request.ProxyHandler({
-                        "http": proxy_url,
-                        "https": proxy_url,
-                    })
-                    opener = urllib.request.build_opener(proxy_handler)
-                    resp = opener.open(req, timeout=15)
-                    tokens = json.loads(resp.read())
-                    rt = tokens.get("refresh_token", "")
-                    if rt:
-                        logger.info("[RT] 代理重试成功: %s...", rt[:30])
-                    return rt
-                except Exception as retry_err:
-                    logger.warning("[RT] 代理重试也失败: %s", retry_err)
-                    return ""
-            raise
     except Exception as e:
         logger.warning("[RT] refresh_token 获取失败: %s", e)
         return ""
@@ -2737,11 +2148,11 @@ def register_outlook_account(
     headless: bool = False,
     extension_path: str = "",
     flow_report=None,
-    proxy_manager=None,  # Deprecated (no longer used for retries)
+    proxy_manager=None,  # Optional ProxyManager for risk control
+    max_retries: int = 2,  # Max retries with proxy switch
     keep_browser_open: bool = False,  # Keep browser open for post-registration tasks (e.g. OAuth)
     extract_rt: bool = False,  # 注册成功后自动在同一浏览器获取 refresh_token
     pause_checker=None,  # 暂停检查回调: pause_checker(step_name) -> bool(stop)
-    slot_index: int = 0,  # 并发槽位索引（0-based），用于计算窗口偏移位置
 ) -> RegistrationResult:
     """
     Register an Outlook account using the CDP hybrid approach.
@@ -2753,7 +2164,8 @@ def register_outlook_account(
         headless: Run in headless mode
         extension_path: Path to browser extension
         flow_report: Flow diagnostics report
-        proxy_manager: Deprecated (no longer used)
+        proxy_manager: Optional ProxyManager for automatic risk control (proxy switch + Chrome restart)
+        max_retries: Max retries with proxy switch on CAPTCHA failure
 
     Returns:
         RegistrationResult with account details
@@ -2775,20 +2187,10 @@ def register_outlook_account(
         provider=account.provider, domain=account.domain, client_id=account.client_id,
     )
 
-    # ── 并发窗口偏移: 每个槽位错开窗口位置，避免重叠 ──
-    # 2列布局: slot 0 -> (0, 0), slot 1 -> (640, 0), slot 2 -> (0, 500), slot 3 -> (640, 500)
-    win_w, win_h = 640, 450  # 每个窗口的大小（小于 screen_size 以容纳多个）
-    col = slot_index % 2
-    row = slot_index // 2
-    win_x = col * (win_w + 20)
-    win_y = row * (win_h + 40) + 40  # 顶部留 40px 给任务栏
-    logger.info("[CDP_REG] Slot %d: window at (%d, %d) size %dx%d", slot_index, win_x, win_y, win_w, win_h)
-
     config = CDPLaunchConfig(
         chrome_path=chrome_path, browser_type=browser_type,
         proxy=proxy_url, proxy_auth_url=proxy_auth_url, headless=headless,
         extensions=[extension_path] if extension_path else [],
-        window_size=(win_w, win_h), window_position=(win_x, win_y),
     )
 
     browser = None
@@ -2897,30 +2299,13 @@ def register_outlook_account(
         # 状态机注册流程：每步可暂停，恢复后自动识别页面状态继续
         # ═══════════════════════════════════════════════════════════
         _steps_done = set()  # 已完成的步骤，避免重复执行
-        _ms_error_count = 0  # microsoft_problem 页面出现次数
-        _empty_page_count = 0  # 页面 body 为空的连续次数
-        _crash_count = 0  # Chrome 崩溃检测计数（局部变量，并发安全）
 
-        for _iter in range(50):  # MAX_ITERATIONS (增加到50，给加载慢的页面更多时间)
+        for _iter in range(20):  # MAX_ITERATIONS
             # 暂停检查：暂停时阻塞，恢复后自动重新检测页面状态
             if _check_pause_or_stop("running"):
                 result.error = "stopped"; return result
             if pause_checker:
                 if pause_checker("running"): result.error = "stopped"; return result
-
-            # 检测 Chrome 是否已崩溃（宽松：连续失败3次才判定崩溃）
-            # 注意：_crash_count 是局部变量，每个注册任务独立，并发安全
-            try:
-                browser.get_url()
-                _crash_count = 0  # 重置计数
-            except Exception:
-                _crash_count += 1
-                if _crash_count >= 3:
-                    logger.error("[CDP_REG] Chrome 进程已崩溃（连续%d次检测失败），退出状态机", _crash_count)
-                    result.error = "browser_crashed"; break
-                else:
-                    logger.warning("[CDP_REG] get_url 异常（第%d次），可能是临时连接问题，重试...", _crash_count)
-                    time.sleep(2); continue
 
             # 自动检测当前页面状态
             page_state = _detect_page_state(browser)
@@ -2935,9 +2320,7 @@ def register_outlook_account(
                 if _check_pause_or_stop("extract_rt"): result.error = "stopped"; return result
                 if extract_rt and browser:
                     try:
-                        # 传入代理 URL，用于 token 交换请求（带认证的完整代理 URL）
-                        _rt_proxy = proxy_info.url if proxy_info and proxy_info.has_auth else (proxy_url if proxy_url else "")
-                        rt = _extract_refresh_token(browser, account.email, account.client_id or "14d82eec-204b-4c2f-b7e8-296a70dab67e", password=account.password, proxy_url=_rt_proxy)
+                        rt = _extract_refresh_token(browser, account.email, account.client_id or "14d82eec-204b-4c2f-b7e8-296a70dab67e", password=account.password)
                         result.refresh_token = rt
                         if rt: logger.info("[CDP_REG] RT 获取成功: %s...", rt[:30])
                         else: logger.warning("[CDP_REG] RT 获取失败（注册已成功）")
@@ -2948,19 +2331,7 @@ def register_outlook_account(
             if page_state == "blocked":
                 result.error = "account_blocked"; break
             if page_state == "microsoft_problem":
-                _ms_error_count += 1
-                if _ms_error_count >= 5:
-                    logger.error("[CDP_REG] microsoft_problem 页面重试 %d 次仍失败,放弃", _ms_error_count)
-                    result.error = "microsoft_problem_page"; break
-                logger.warning("[CDP_REG] microsoft_problem 页面 (第%d次), 等待5秒后刷新重试...", _ms_error_count)
-                time.sleep(5)
-                # 尝试刷新页面重新加载
-                try:
-                    browser.navigate(SIGNUP_URL, wait_for_load=True, timeout=20)
-                except Exception:
-                    pass
-                _steps_done.clear()  # 重置步骤状态，重新开始
-                continue
+                result.error = "microsoft_problem_page"; break
             if page_state == "proxy_error":
                 err_snippet = browser.get_body_text()[:200]
                 logger.error("[CDP_REG] 代理错误页面: %s", err_snippet)
@@ -2968,12 +2339,6 @@ def register_outlook_account(
 
             # ── 填写邮箱 ──
             if page_state == "fill_username" and "fill_username" not in _steps_done:
-                # 额外检查: 确保 body 有内容（SPA 已渲染）
-                body_check = browser.get_body_text().strip()
-                if len(body_check) < 30:
-                    logger.warning("[CDP_REG] fill_username 但 body 长度仅 %d，SPA 可能未渲染，等待...", len(body_check))
-                    time.sleep(3)
-                    continue
                 if _check_pause_or_stop("fill_username"): result.error = "stopped"; return result
                 if _fill_username(browser, account):
                     _steps_done.add("fill_username")
@@ -3030,8 +2395,21 @@ def register_outlook_account(
                         cleared = _wait_for_manual_captcha(browser)
                     result.challenge_cleared = cleared
                     if not cleared:
-                        # CAPTCHA 未通过 — 系统级阻碍，直接结束（不再关闭浏览器换代理重试）
-                        logger.error("[CAPTCHA] CAPTCHA not solved (%s) → system blockage, aborting", captcha['type'])
+                        if proxy_manager and max_retries > 0:
+                            logger.warning("[CAPTCHA] CAPTCHA failed, attempting risk control...")
+                            if proxy_manager.handle_risk_control():
+                                if browser:
+                                    try: browser.close()
+                                    except: pass
+                                    browser = None
+                                new_proxy = proxy_manager.get_proxy_url() or ""
+                                return register_outlook_account(
+                                    account=account, chrome_path=chrome_path,
+                                    browser_type=browser_type,
+                                    proxy=new_proxy, headless=headless,
+                                    extension_path=extension_path, flow_report=flow_report,
+                                    proxy_manager=proxy_manager, max_retries=max_retries - 1,
+                                )
                         result.error = f"captcha_not_solved: {captcha['type']}"; break
                 else:
                     logger.info("[CAPTCHA] State=captcha but no captcha detected, waiting...")
@@ -3050,85 +2428,31 @@ def register_outlook_account(
                     logger.info("[CDP_REG] Registration successful: %s", account.email)
                     if extract_rt and browser:
                         try:
-                            _rt_proxy = proxy_info.url if proxy_info and proxy_info.has_auth else (proxy_url if proxy_url else "")
-                            rt = _extract_refresh_token(browser, account.email, account.client_id or "14d82eec-204b-4c2f-b7e8-296a70dab67e", password=account.password, proxy_url=_rt_proxy)
+                            rt = _extract_refresh_token(browser, account.email, account.client_id or "14d82eec-204b-4c2f-b7e8-296a70dab67e", password=account.password)
                             result.refresh_token = rt
                             if rt: logger.info("[CDP_REG] RT 获取成功: %s...", rt[:30])
                         except Exception as rt_exc:
                             logger.warning("[CDP_REG] RT 获取异常: %s", rt_exc)
-                    break
                 elif final_state == "microsoft_problem":
-                    result.error = "microsoft_problem_page"; break
+                    result.error = "microsoft_problem_page"
                 elif final_state == "blocked":
-                    result.error = "account_blocked"; break
-                elif final_state in ("fill_username", "fill_password", "fill_profile"):
-                    # _handle_post_challenge 返回了需要填写的状态，继续主循环处理
-                    logger.info("[CDP_REG] post_challenge 返回 %s，继续主循环处理", final_state)
-                    continue
+                    result.error = "account_blocked"
                 else:
-                    result.error = f"unexpected_final_state: {final_state}"; break
+                    result.error = f"unexpected_final_state: {final_state}"
+                break
 
-            # ── loading/page_empty 状态: SPA 未渲染，等待或刷新 ──
-            if page_state == "loading":
-                logger.info("[CDP_REG] 页面加载中 (body 为空)，等待3秒...")
-                time.sleep(3)
-                continue
-            if page_state == "page_empty":
-                # 追踪空页面次数（局部变量，每个注册任务独立）
-                _empty_page_count += 1
-                if _empty_page_count >= 3:
-                    logger.warning("[CDP_REG] 页面 body 持续为空 (第%d次)，刷新页面重试...", _empty_page_count)
-                    try:
-                        browser.navigate(SIGNUP_URL, wait_for_load=True, timeout=20)
-                    except Exception:
-                        pass
-                    _empty_page_count = 0
-                    time.sleep(3)
-                    continue
-                logger.info("[CDP_REG] 页面 DOM 完成但 body 为空 (第%d次)，等待3秒...", _empty_page_count)
-                time.sleep(3)
-                continue
-
-            # ── 未知状态 → 等待页面加载，尝试恢复 ──
+            # ── 未知状态 → 等待页面加载 ──
             logger.info("[CDP_REG] 未知页面状态 '%s'，等待3秒...", page_state)
             time.sleep(3)
-            # 连续多次 unknown 后，尝试点击可能的提交按钮（页面可能卡在中间状态）
-            if _iter > 0 and _iter % 5 == 0:
-                # 先检查 body 是否有内容，避免在空白页面上盲目点击
-                body_now = browser.get_body_text().strip()
-                if len(body_now) > 50:
-                    logger.info("[CDP_REG] 连续 unknown %d 次，尝试点击 Next/Submit 按钮恢复", _iter)
-                    _click_next(browser)
-                    time.sleep(2)
-                else:
-                    logger.info("[CDP_REG] 连续 unknown %d 次，但 body 为空(长度=%d)，跳过点击", _iter, len(body_now))
         else:
             result.error = "max_iterations_reached"
             logger.error("[CDP_REG] 状态机循环超过最大次数")
 
     except Exception as e:
-        err_str = str(e)
-        # 检测 Chrome 崩溃：如果 Chrome 进程已退出，明确标记为 browser_crashed 而非注册失败
-        # 宽松检测：连续3次 evaluate 失败才判定崩溃
-        chrome_alive = False
-        if browser:
-            for _crash_check in range(3):
-                try:
-                    chrome_alive = browser.evaluate("true") is not None
-                    if chrome_alive:
-                        break
-                except Exception:
-                    if _crash_check < 2:
-                        time.sleep(1)
-        if not chrome_alive and browser:
-            logger.error("[CDP_REG] Chrome process crashed during registration")
-            result.error = "browser_crashed"
-        else:
-            logger.exception("[CDP_REG] Registration failed: %s", e)
-            result.error = err_str
+        logger.exception("[CDP_REG] Registration failed: %s", e)
+        result.error = str(e)
     finally:
         _unregister_browser()  # 从线程安全字典中移除
-        _clear_thread_state()  # 清理线程级控制状态
         if browser and not keep_browser_open:
             try:
                 # Take final screenshot

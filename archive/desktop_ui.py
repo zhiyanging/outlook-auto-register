@@ -294,7 +294,7 @@ class NinjemailDesktopApp(tk.Tk):
         self._update_provider_hint()
 
     def _build_variables(self) -> None:
-        self.browser_var = tk.StringVar(value="firefox")
+        self.browser_var = tk.StringVar(value="chrome")
         self.captcha_service_var = tk.StringVar(value="capsolver")
         self.captcha_key_var = tk.StringVar(value="")
         self.sms_service_var = tk.StringVar(value="smspool")
@@ -362,7 +362,7 @@ class NinjemailDesktopApp(tk.Tk):
 
         self.summary_label = ttk.Label(
             summary,
-            text="支持 Gmail / Outlook / Yahoo，浏览器：firefox、chrome、undetected-chrome",
+            text="支持 Gmail / Outlook / Yahoo，浏览器：chrome、edge、brave 等 Chromium 内核浏览器",
             wraplength=1040,
         )
         self.summary_label.pack(anchor="w")
@@ -457,7 +457,7 @@ class NinjemailDesktopApp(tk.Tk):
         frame.pack(fill="both", expand=True)
         frame.columnconfigure(1, weight=1)
 
-        self._add_labeled_dropdown(frame, 0, "浏览器", self.browser_var, ["firefox", "chrome", "undetected-chrome"])
+        self._add_labeled_dropdown(frame, 0, "浏览器", self.browser_var, ["chrome", "edge", "brave", "chromium", "vivaldi", "thorium", "opera"])
         self._add_labeled_dropdown(frame, 1, "验证码服务", self.captcha_service_var, ["", "capsolver", "nopecha"])
         self._add_labeled_entry(frame, 2, "验证码 API Key", self.captcha_key_var, show="*")
         self._add_labeled_dropdown(frame, 3, "短信服务", self.sms_service_var, ["", "getsmscode", "smspool", "5sim"])

@@ -1420,7 +1420,7 @@ def reload_current_config():
     if not config:
         logger.warning("[BLOCK] 未找到 runtime_config.toml")
         return (
-            "undetected-chrome",
+            "chrome",
             False,
             False,
             True,
@@ -1447,7 +1447,7 @@ def reload_current_config():
     proxy_text = "\n".join(_creation_proxy_items(proxy))
     logger.info("[STEP] 已加载 runtime_config.toml")
     return (
-        config.get("browser") or "undetected-chrome",
+        config.get("browser") or "chrome",
         bool(config.get("auto_proxy", False)),
         bool(config.get("persistent_browser_profile", False)),
         bool(browser_extension.get("enabled", True)),
@@ -1472,7 +1472,7 @@ def reload_current_config():
 def auto_configure_free_services_ui(browser, proxy_api_key, webshare_token, sms_country):
     logger.info("[STEP] 实测更多服务并更新配置")
     config, lines = auto_configure_free_services(
-        browser=browser or "undetected-chrome",
+        browser=browser or "chrome",
         country=sms_country or "USA",
         proxy_api_key=proxy_api_key or "",
         webshare_token=webshare_token or "",
@@ -1583,8 +1583,8 @@ def init_ninjemail(browser, captcha_service, captcha_key, sms_service, sms_user,
         logger.info("[STEP 3/3] 创建 Ninjemail 实例")
         browser_plugin_paths = []
         if ninjemail_extension_enabled:
-            if str(browser or "").lower() not in {"chrome", "edge", "undetected-chrome"}:
-                return "❌ 初始化失败：Ninjemail 内置浏览器插件是 Chromium 扩展，请选择 edge/chrome/undetected-chrome。", get_web_log_text()
+            if str(browser or "").lower() not in {"chrome", "edge"}:
+                return "❌ 初始化失败：Ninjemail 内置浏览器插件是 Chromium 扩展，请选择 edge 或 chrome。", get_web_log_text()
             plugin_result = check_ninjemail_extension()
             logger.info(plugin_result.line())
             if not plugin_result.ok:
@@ -2287,8 +2287,8 @@ with gr.Blocks(title="Ninjemail 邮箱自动注册") as demo:
         gr.Markdown("### 基础设置")
         with gr.Row():
             browser = gr.Dropdown(
-                choices=["edge", "chrome", "firefox", "undetected-chrome"],
-                value=INITIAL_CONFIG.get("browser") or "undetected-chrome",
+                choices=["chrome", "edge", "brave", "chromium", "vivaldi", "thorium", "opera", "ungoogled", "cent", "360", "qq", "sogou", "maxthon", "yandex", "srware", "slimjet"],
+                value=INITIAL_CONFIG.get("browser") or "chrome",
                 label="浏览器",
             )
             use_auto_proxy = gr.Checkbox(

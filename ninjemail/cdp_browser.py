@@ -13,6 +13,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import threading
 import time
 import socket
 import urllib.request
@@ -99,10 +100,180 @@ BROWSER_PATHS = {
         r"C:\Program Files\Slimjet\slimjet.exe",
         os.path.expanduser(r"~\AppData\Local\Slimjet\Application\slimjet.exe"),
     ],
+    # ── 指纹浏览器（Fingerprint Browsers）──
+    "adspower": [
+        os.path.expanduser(r"~\AppData\Local\AdsPower\AdsPower.exe"),
+        r"C:\Program Files\AdsPower\AdsPower.exe",
+        r"D:\AdsPower\AdsPower.exe",
+        r"D:\AdsPower Global\AdsPower.exe",
+    ],
+    "multilogin": [
+        os.path.expanduser(r"~\AppData\Local\Multilogin\Multilogin.exe"),
+        r"C:\Program Files\Multilogin\Multilogin.exe",
+    ],
+    "bitbrowser": [
+        os.path.expanduser(r"~\AppData\Local\BitBrowser\BitBrowser.exe"),
+        r"C:\Program Files\BitBrowser\BitBrowser.exe",
+        r"D:\BitBrowser\BitBrowser.exe",
+    ],
+    "vmlogin": [
+        os.path.expanduser(r"~\AppData\Local\VMLogin\VMLogin.exe"),
+        r"C:\Program Files\VMLogin\VMLogin.exe",
+    ],
+    "gologin": [
+        os.path.expanduser(r"~\AppData\Local\GoLogin\GoLogin.exe"),
+        r"C:\Program Files\GoLogin\GoLogin.exe",
+    ],
+    "dolphin_anty": [
+        os.path.expanduser(r"~\AppData\Local\Dolphin Anty\Dolphin Anty.exe"),
+        r"C:\Program Files\Dolphin Anty\Dolphin Anty.exe",
+    ],
+    "linken_sphere": [
+        os.path.expanduser(r"~\AppData\Local\Linken Sphere\Linken Sphere.exe"),
+        r"C:\Program Files\Linken Sphere\Linken Sphere.exe",
+    ],
+    "undetected_browser": [
+        os.path.expanduser(r"~\AppData\Local\Undetected Browser\Undetected Browser.exe"),
+        r"C:\Program Files\Undetected Browser\Undetected Browser.exe",
+    ],
+    "kameleo": [
+        os.path.expanduser(r"~\AppData\Local\Kameleo\Kameleo.exe"),
+        r"C:\Program Files\Kameleo\Kameleo.exe",
+    ],
+    "morelogin": [
+        os.path.expanduser(r"~\AppData\Local\MoreLogin\MoreLogin.exe"),
+        r"C:\Program Files\MoreLogin\MoreLogin.exe",
+    ],
+    "hubstudio": [
+        os.path.expanduser(r"~\AppData\Local\HubStudio\HubStudio.exe"),
+        r"C:\Program Files\HubStudio\HubStudio.exe",
+    ],
+    "clonbrowser": [
+        os.path.expanduser(r"~\AppData\Local\ClonBrowser\ClonBrowser.exe"),
+        r"C:\Program Files\ClonBrowser\ClonBrowser.exe",
+    ],
+    "maskfog": [
+        os.path.expanduser(r"~\AppData\Local\MaskFog\MaskFog.exe"),
+        r"C:\Program Files\MaskFog\MaskFog.exe",
+    ],
+    "lalicat": [
+        os.path.expanduser(r"~\AppData\Local\Lalicat\Lalicat.exe"),
+        r"C:\Program Files\Lalicat\Lalicat.exe",
+    ],
 }
 
-CDP_CHECK_TIMEOUT = 30  # seconds to wait for CDP to be ready
+# 浏览器下载信息 {browser_key: {"name": 显示名, "url": 下载页, "installer": 直链(可选)}}
+BROWSER_DOWNLOAD_INFO = {
+    "chrome": {"name": "Chrome", "url": "https://www.google.com/chrome/", "installer": "https://dl.google.com/chrome/install/latest/chrome_installer.exe"},
+    "edge": {"name": "Edge", "url": "https://www.microsoft.com/edge"},
+    "brave": {"name": "Brave", "url": "https://brave.com/download/", "installer": "https://laptop-updates.brave.com/latest/winx64/BraveBrowserSetup.exe"},
+    "chromium": {"name": "Chromium", "url": "https://www.chromium.org/getting-involved/download-chromium/"},
+    "vivaldi": {"name": "Vivaldi", "url": "https://vivaldi.com/download/"},
+    "thorium": {"name": "Thorium", "url": "https://github.com/nicothin/nicothin.github.io/wiki/Thorium"},
+    "opera": {"name": "Opera", "url": "https://www.opera.com/download"},
+    # 指纹浏览器
+    "adspower": {"name": "AdsPower", "url": "https://www.adspower.com/download"},
+    "multilogin": {"name": "Multilogin", "url": "https://multilogin.com/download/"},
+    "bitbrowser": {"name": "BitBrowser", "url": "https://www.bitbrowser.cn/download"},
+    "vmlogin": {"name": "VMLogin", "url": "https://vmlogin.us/"},
+    "gologin": {"name": "GoLogin", "url": "https://gologin.com/download"},
+    "dolphin_anty": {"name": "Dolphin Anty", "url": "https://dolphin-anty.com/"},
+    "linken_sphere": {"name": "Linken Sphere", "url": "https://linkensphere.com/"},
+    "undetected_browser": {"name": "Undetected Browser", "url": "https://undetected.com/"},
+    "kameleo": {"name": "Kameleo", "url": "https://kameleo.io/"},
+    "morelogin": {"name": "MoreLogin", "url": "https://www.morelogin.com/"},
+    "hubstudio": {"name": "HubStudio", "url": "https://www.hubstudio.com/"},
+    "clonbrowser": {"name": "ClonBrowser", "url": "https://www.clonbrowser.com/"},
+    "maskfog": {"name": "MaskFog", "url": "https://www.maskfog.com/"},
+    "lalicat": {"name": "Lalicat", "url": "https://www.lalicat.com/"},
+}
+
+CDP_CHECK_TIMEOUT = 45  # seconds to wait for CDP to be ready (increased from 30 for stability)
 CDP_CHECK_INTERVAL = 0.3
+_LAUNCH_LOCK = threading.Lock()  # 并发启动Chrome时串行化，避免资源竞争导致崩溃
+
+
+def detect_installed_browsers() -> dict:
+    """检测系统上已安装的 Chromium 内核浏览器，返回 {browser_name: exe_path}"""
+    import shutil
+    installed = {}
+    # 别名映射（和 _find_browser 保持一致）
+    aliases = {
+        "google-chrome": "chrome", "googlechrome": "chrome",
+        "undetected-chrome": "chrome", "undetected_chrome": "chrome", "undetectedchrome": "chrome",
+        "msedge": "edge", "microsoft-edge": "edge", "microsoftedge": "edge",
+        "brave-browser": "brave", "bravebrowser": "brave",
+        "opera-gx": "opera", "operagx": "opera",
+        "ungoogled-chromium": "ungoogled", "ungoogledchromium": "ungoogled",
+        "centbrowser": "cent", "cent-browser": "cent",
+        "360se": "360", "360chrome": "360", "360-browser": "360",
+        "qqbrowser": "qq", "qq-browser": "qq",
+        "sogou-browser": "sogou", "sogoubrowser": "sogou",
+        "maxthon-browser": "maxthon",
+        "yandex-browser": "yandex", "yandexbrowser": "yandex",
+        "srware-iron": "srware", "iron": "srware",
+        "slimjet-browser": "slimjet",
+    }
+    exe_names = {
+        "chrome": ["chrome", "google-chrome"],
+        "edge": ["msedge", "microsoft-edge"],
+        "brave": ["brave", "brave-browser"],
+        "chromium": ["chromium"],
+        "vivaldi": ["vivaldi"],
+        "thorium": ["thorium"],
+        "opera": ["opera"],
+        "ungoogled": ["chrome"],
+        "cent": ["chrome"],
+        "360": ["360se", "360chrome"],
+        "qq": ["QQBrowser"],
+        "sogou": ["SogouExplorer"],
+        "maxthon": ["Maxthon"],
+        "yandex": ["browser"],
+        "srware": ["iron"],
+        "slimjet": ["slimjet"],
+        "adspower": ["AdsPower"],
+        "multilogin": ["Multilogin"],
+        "bitbrowser": ["BitBrowser"],
+        "vmlogin": ["VMLogin"],
+        "gologin": ["GoLogin"],
+        "dolphin_anty": ["Dolphin Anty"],
+        "linken_sphere": ["Linken Sphere"],
+        "undetected_browser": ["Undetected Browser"],
+        "kameleo": ["Kameleo"],
+        "morelogin": ["MoreLogin"],
+        "hubstudio": ["HubStudio"],
+        "clonbrowser": ["ClonBrowser"],
+        "maskfog": ["MaskFog"],
+        "lalicat": ["Lalicat"],
+    }
+    display_names = {
+        "chrome": "Chrome", "edge": "Edge", "brave": "Brave",
+        "chromium": "Chromium", "vivaldi": "Vivaldi", "thorium": "Thorium",
+        "opera": "Opera / Opera GX", "ungoogled": "Ungoogled Chromium",
+        "cent": "Cent Browser", "360": "360 浏览器", "qq": "QQ 浏览器",
+        "sogou": "搜狗浏览器", "maxthon": "傲游浏览器", "yandex": "Yandex Browser",
+        "srware": "SRWare Iron", "slimjet": "Slimjet",
+        "adspower": "AdsPower", "multilogin": "Multilogin", "bitbrowser": "BitBrowser",
+        "vmlogin": "VMLogin", "gologin": "GoLogin", "dolphin_anty": "Dolphin Anty",
+        "linken_sphere": "Linken Sphere", "undetected_browser": "Undetected Browser",
+        "kameleo": "Kameleo", "morelogin": "MoreLogin", "hubstudio": "HubStudio",
+        "clonbrowser": "ClonBrowser", "maskfog": "MaskFog", "lalicat": "Lalicat",
+    }
+    for btype in BROWSER_PATHS:
+        # 检查硬编码路径
+        for path in BROWSER_PATHS[btype]:
+            if os.path.isfile(path):
+                installed[btype] = {"path": path, "name": display_names.get(btype, btype)}
+                break
+        if btype in installed:
+            continue
+        # 检查 PATH
+        for name in exe_names.get(btype, []):
+            found = shutil.which(name)
+            if found:
+                installed[btype] = {"path": found, "name": display_names.get(btype, btype)}
+                break
+    return installed
 
 
 def _find_browser(browser_type: str = "chrome") -> str:
@@ -111,6 +282,7 @@ def _find_browser(browser_type: str = "chrome") -> str:
     # 别名映射
     aliases = {
         "google-chrome": "chrome", "googlechrome": "chrome",
+        "undetected-chrome": "chrome", "undetected_chrome": "chrome", "undetectedchrome": "chrome",
         "msedge": "edge", "microsoft-edge": "edge", "microsoftedge": "edge",
         "brave-browser": "brave", "bravebrowser": "brave",
         "opera-gx": "opera", "operagx": "opera",
@@ -123,6 +295,12 @@ def _find_browser(browser_type: str = "chrome") -> str:
         "yandex-browser": "yandex", "yandexbrowser": "yandex",
         "srware-iron": "srware", "iron": "srware",
         "slimjet-browser": "slimjet",
+        "firefox": "chrome",  # Firefox 不支持 CDP，回退到 Chrome
+        # 指纹浏览器别名
+        "adspower-global": "adspower", "adspower global": "adspower",
+        "dolphin-anty": "dolphin_anty", "dolphinanty": "dolphin_anty",
+        "linken-sphere": "linken_sphere", "linkensphere": "linken_sphere",
+        "undetected-browser": "undetected_browser", "undetectedbrowser": "undetected_browser",
     }
     browser_type = aliases.get(browser_type, browser_type)
 
@@ -149,16 +327,28 @@ def _find_browser(browser_type: str = "chrome") -> str:
         "yandex": ["browser"],
         "srware": ["iron"],
         "slimjet": ["slimjet"],
+        "adspower": ["AdsPower"],
+        "multilogin": ["Multilogin"],
+        "bitbrowser": ["BitBrowser"],
+        "vmlogin": ["VMLogin"],
+        "gologin": ["GoLogin"],
+        "dolphin_anty": ["Dolphin Anty"],
+        "linken_sphere": ["Linken Sphere"],
+        "undetected_browser": ["Undetected Browser"],
+        "kameleo": ["Kameleo"],
+        "morelogin": ["MoreLogin"],
+        "hubstudio": ["HubStudio"],
+        "clonbrowser": ["ClonBrowser"],
+        "maskfog": ["MaskFog"],
+        "lalicat": ["Lalicat"],
     }
     for name in exe_names.get(browser_type, ["chrome"]):
         found = shutil.which(name)
         if found:
             return found
-    # 回退到 Chrome
-    if browser_type != "chrome":
-        logger.warning("[CDP] Browser '%s' not found, falling back to Chrome", browser_type)
-        return _find_browser("chrome")
-    raise FileNotFoundError(f"Browser '{browser_type}' not found. Install it or set the correct path.")
+    raise FileNotFoundError(
+        f"浏览器 '{browser_type}' 未找到。请确认已安装该浏览器，或在页面刷新后选择其他已安装的浏览器。"
+    )
 
 def _find_chrome() -> str:
     """Find Chrome executable path (legacy compatibility)."""
@@ -192,16 +382,21 @@ def _wait_for_cdp(port: int, timeout: float = CDP_CHECK_TIMEOUT) -> dict:
 
 
 def _get_page_ws_url(port: int) -> str:
-    """Get the WebSocket URL for the first page tab."""
+    """Get the WebSocket URL for the first page tab (带重试，并发启动时需要更长时间）。"""
     url = f"http://127.0.0.1:{port}/json"
-    try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            tabs = json.loads(resp.read())
-            for tab in tabs:
-                if tab.get("type") == "page":
-                    return tab["webSocketDebuggerUrl"]
-    except Exception as e:
+    for attempt in range(6):  # 最多重试6次
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                tabs = json.loads(resp.read())
+                for tab in tabs:
+                    if tab.get("type") == "page":
+                        return tab["webSocketDebuggerUrl"]
+        except Exception as e:
+            if attempt < 5:
+                time.sleep(1)
+                continue
+            logger.warning("[CDP] Failed to get page WS URL: %s", e)
         logger.warning("[CDP] Failed to get page WS URL: %s", e)
     return ""
 
@@ -217,6 +412,7 @@ class CDPLaunchConfig:
     proxy_auth_url: str = ""  # Full proxy URL with credentials for Fetch auth
     headless: bool = False
     window_size: tuple[int, int] = (1280, 900)
+    window_position: tuple[int, int] = (0, 0)  # 窗口左上角位置（并发时错开：0=0,50  1=400,50  2=800,50 ...）
     extra_args: list[str] = field(default_factory=list)
     extensions: list[str] = field(default_factory=list)
 
@@ -247,8 +443,9 @@ class CDPBrowser:
         self._temp_dir: str = ""
 
     def launch(self) -> "CDPBrowser":
-        """Launch Chrome and connect via CDP."""
+        """Launch browser and connect via CDP."""
         chrome_path = self.config.chrome_path or _find_browser(self.config.browser_type)
+        logger.info("[CDP] Browser type requested: '%s', resolved path: %s", self.config.browser_type, chrome_path)
         self._port = self.config.debug_port or _find_free_port()
 
         # Create temp user data dir if not specified
@@ -278,7 +475,7 @@ class CDPBrowser:
             except Exception as exc:
                 logger.warning("[CDP] Failed to start relay, using direct proxy: %s", exc)
 
-        # Build Chrome args - NO automation flags
+        # Build Chrome args - NO automation flags, 无痕模式
         args = [
             chrome_path,
             f"--remote-debugging-port={self._port}",
@@ -291,14 +488,32 @@ class CDPBrowser:
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
-            "--disable-features=TranslateUI",
+            "--disable-features=TranslateUI,BuiltInDnsClient",
             "--disable-hang-monitor",
             "--remote-allow-origins=*",
             f"--window-size={self.config.window_size[0]},{self.config.window_size[1]}",
+            f"--window-position={self.config.window_position[0]},{self.config.window_position[1]}",
             "--incognito",
-            # 关键：禁用 Chrome 内置 DNS，强制用系统 DNS 解析
-            # Chrome 内置 DNS 在 SOCKS5 代理下可能卡死
-            "--disable-features=BuiltInDnsClient",
+            # 稳定性增强标志
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-accelerated-2d-canvas",
+            "--disable-accelerated-video-decode",
+            "--disable-component-update",
+            "--disable-background-networking",
+            "--metrics-recording-only",
+            "--disable-sync",
+            # ── 无痕：禁止缓存和密码保存 ──
+            "--disk-cache-size=0",
+            "--disable-save-password-bubble",
+            "--disable-password-generation",
+            "--password-store=basic",
+            "--disable-sync",
+            "--disable-client-side-phishing-detection",
+            "--no-pings",
         ]
 
         if self.config.headless:
@@ -306,9 +521,9 @@ class CDPBrowser:
 
         if effective_proxy:
             args.append(f"--proxy-server={effective_proxy}")
-            # 不设 bypass list，让所有流量走代理（包括 localhost 的 CDP 调试端口也走代理会导致问题）
-            # 所以只排除 CDP 调试端口
-            args.append(f"--proxy-bypass-list=127.0.0.1:{self._port}")
+            # 排除所有本地回环流量（CDP调试端口、本地回调服务器等）
+            # <-loopback> 是 Chrome 特殊标记，匹配 localhost/127.0.0.1/::1
+            args.append(f"--proxy-bypass-list=<-loopback>")
 
         # Load extensions (the browser extension for enhanced detection)
         if self.config.extensions:
@@ -318,14 +533,55 @@ class CDPBrowser:
 
         args.extend(self.config.extra_args)
 
-        logger.info("[CDP] Launching Chrome on port %d", self._port)
+        logger.info("[CDP] Launching %s on port %d", os.path.basename(chrome_path), self._port)
         logger.debug("[CDP] Args: %s", " ".join(args[:10]) + "...")
 
-        self._process = subprocess.Popen(
-            args,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        # 并发启动锁：串行化Chrome启动，避免多实例同时启动导致资源竞争崩溃
+        # 带重试：并发时 Chrome 偶尔崩溃（exit code 1），最多重试 3 次
+        MAX_LAUNCH_RETRIES = 3
+        for _launch_attempt in range(MAX_LAUNCH_RETRIES):
+            with _LAUNCH_LOCK:
+                self._process = subprocess.Popen(
+                    args,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                # 等待一小段时间让Chrome进程稳定，再启动下一个
+                time.sleep(2)
+
+            # 检查 Chrome 是否立即崩溃
+            if self._process.poll() is not None:
+                exit_code = self._process.returncode
+                logger.warning("[CDP] Chrome exited immediately with code %d (attempt %d/%d)",
+                               exit_code, _launch_attempt + 1, MAX_LAUNCH_RETRIES)
+                if _launch_attempt < MAX_LAUNCH_RETRIES - 1:
+                    # 清理旧的 temp dir，重新创建
+                    if self._temp_dir:
+                        import shutil
+                        shutil.rmtree(self._temp_dir, ignore_errors=True)
+                        self._temp_dir = tempfile.mkdtemp(prefix="ninjemail_chrome_")
+                        # 更新 args 中的 user-data-dir
+                        for i, a in enumerate(args):
+                            if a.startswith("--user-data-dir="):
+                                args[i] = f"--user-data-dir={self._temp_dir}"
+                                break
+                    # 换一个新端口
+                    self._port = _find_free_port()
+                    for i, a in enumerate(args):
+                        if a.startswith("--remote-debugging-port="):
+                            args[i] = f"--remote-debugging-port={self._port}"
+                            break
+                    # 更新 bypass list
+                    for i, a in enumerate(args):
+                        if a.startswith("--proxy-bypass-list="):
+                            args[i] = "--proxy-bypass-list=<-loopback>"
+                            break
+                    time.sleep(1)
+                    continue
+                else:
+                    raise RuntimeError(f"Chrome failed to launch after {MAX_LAUNCH_RETRIES} attempts (exit code {exit_code})")
+            else:
+                break  # Chrome launched successfully
 
         # Wait for CDP to be ready
         _wait_for_cdp(self._port)
@@ -333,10 +589,81 @@ class CDPBrowser:
         # Connect WebSocket
         self._connect_ws()
 
+        # 清除缓存和 Cookie（确保全新无痕）
+        try:
+            self._send_cmd("Network.enable")
+            self._send_cmd("Network.clearBrowserCache")
+            self._send_cmd("Network.clearBrowserCookies")
+        except Exception:
+            pass
+
         # Enable necessary CDP domains
         self._send_cmd("Runtime.enable")
         self._send_cmd("DOM.enable")
         self._send_cmd("Page.enable")
+        
+        # Monitor console and dialogs for debugging
+        try:
+            self._send_cmd("Log.enable")
+            self._event_handlers.setdefault("Log.entryAdded", []).append(
+                lambda e: logger.info("[CONSOLE] %s", str(e.get('params', {}).get('entry', {}).get('text', ''))[:200])
+            )
+            self._event_handlers.setdefault("Runtime.consoleAPICalled", []).append(
+                lambda e: logger.info("[CONSOLE] %s", str([a.get('value','') for a in e.get('params', {}).get('args', [])])[:200])
+            )
+            self._event_handlers.setdefault("Page.javascriptDialogOpening", []).append(
+                lambda e: logger.warning("[DIALOG] %s: %s", e.get('params',{}).get('type',''), e.get('params',{}).get('message','')[:200])
+            )
+            # Monitor for target crash or close
+            self._event_handlers.setdefault("Inspector.detached", []).append(
+                lambda e: logger.warning("[CDP] Inspector detached: %s", e.get('params',{}).get('reason',''))
+            )
+            self._event_handlers.setdefault("Target.targetDestroyed", []).append(
+                lambda e: logger.warning("[CDP] Target destroyed")
+            )
+        except Exception as e:
+            logger.debug("Console monitoring setup failed: %s", e)
+        
+        # Monitor Chrome process
+        import threading
+        def _monitor_process():
+            if self._process:
+                ret = self._process.wait()
+                logger.warning("[CDP] Chrome process exited with code %s", ret)
+        self._monitor_thread = threading.Thread(target=_monitor_process, daemon=True)
+        self._monitor_thread.start()
+
+        # ── 并发安全: 用 CDP 精确设置窗口位置和大小 ──
+        # 启动参数 --window-position 有时不可靠，这里用 CDP 命令精确控制
+        if self.config.window_position != (0, 0):
+            try:
+                # 获取当前窗口 target ID
+                targets = self._send_cmd("Target.getTargets")
+                window_target = None
+                for t in (targets or {}).get("targetInfos", []):
+                    if t.get("type") == "page":
+                        window_target = t.get("targetId")
+                        break
+                if window_target:
+                    # 获取 window ID
+                    result = self._send_cmd("Browser.getWindowForTarget", {"targetId": window_target})
+                    window_id = result.get("windowId")
+                    if window_id is not None:
+                        self._send_cmd("Browser.setWindowBounds", {
+                            "windowId": window_id,
+                            "bounds": {
+                                "left": self.config.window_position[0],
+                                "top": self.config.window_position[1],
+                                "width": self.config.window_size[0],
+                                "height": self.config.window_size[1],
+                                "windowState": "normal",
+                            }
+                        })
+                        logger.info("[CDP] Window positioned at (%d, %d) size=%dx%d",
+                                    self.config.window_position[0], self.config.window_position[1],
+                                    self.config.window_size[0], self.config.window_size[1])
+            except Exception as e:
+                logger.debug("[CDP] Window positioning via CDP failed: %s", e)
 
         # Set up proxy auth if proxy has credentials (Fetch domain fallback)
         # Only needed if relay didn't start
@@ -351,25 +678,42 @@ class CDPBrowser:
         return self
 
     def _connect_ws(self):
-        """Connect to Chrome via WebSocket."""
+        """Connect to Chrome via WebSocket (带重试，并发启动时Chrome页面加载较慢）。"""
         ws_url = _get_page_ws_url(self._port)
         if not ws_url:
-            # If no page tab, create one
-            self._send_cmd_via_http("Target.createTarget", {"url": "about:blank"})
-            time.sleep(0.5)
-            ws_url = _get_page_ws_url(self._port)
+            # If no page tab, create one and retry
+            for retry in range(3):
+                try:
+                    self._send_cmd_via_http("Target.createTarget", {"url": "about:blank"})
+                except Exception:
+                    pass
+                time.sleep(1 + retry)
+                ws_url = _get_page_ws_url(self._port)
+                if ws_url:
+                    break
         if not ws_url:
             raise RuntimeError("Cannot find Chrome page tab for CDP")
 
+        # 关闭旧 WebSocket（如果有的话，重连场景）
+        if self._ws:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+
         import websocket
-        self._ws = websocket.create_connection(ws_url, timeout=30, ping_interval=20, ping_timeout=10)
+        self._ws = websocket.create_connection(ws_url, timeout=30, ping_interval=15, ping_timeout=10)
         self._ws_url = ws_url
         logger.info("[CDP] WebSocket connected to %s", ws_url[:80])
 
-        # Start listening thread
-        import threading
+        # Start/restart listening thread
+        if self._listen_thread and self._listen_thread.is_alive():
+            # 旧 listen 线程仍在运行，等它退出（因为旧 _ws 已关闭）
+            self._listen_thread.join(timeout=3)
         self._listen_thread = threading.Thread(target=self._listen_loop, daemon=True)
         self._listen_thread.start()
+        self._connected = True
 
     def _listen_loop(self):
         """Background thread to receive CDP messages."""
@@ -397,8 +741,11 @@ class CDPBrowser:
                 if self._ws:
                     logger.debug("[CDP] Listen error: %s", e)
                 break
+        logger.info("[CDP] Listen loop exited")
+        # 标记连接已断开
+        self._connected = False
 
-    def _send_cmd(self, method: str, params: dict | None = None, timeout: float = 15) -> dict:
+    def _send_cmd(self, method: str, params: dict | None = None, timeout: float = 30) -> dict:
         """Send a CDP command and wait for response. Auto-reconnects if WebSocket is closed."""
         import websocket as _ws_mod
 
@@ -1086,6 +1433,7 @@ class CDPBrowser:
         if self._temp_dir:
             try:
                 import shutil
+                time.sleep(0.5)  # 等待 Chrome 完全退出后再删除
                 shutil.rmtree(self._temp_dir, ignore_errors=True)
             except Exception:
                 pass

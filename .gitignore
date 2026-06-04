@@ -255,6 +255,12 @@ outlook_token_export_*.*
 # 大型研究文档（保留docs但排除大型json）
 docs/*.json
 
+# 浏览器 profile（含大型模型文件）
+ninjemail/chrome_profile_proton/
+
+# 代理运行时（含可执行文件）
+ninjemail/mihomo_runtime/
+
 # 其他
 *.crx
 *.xpi
