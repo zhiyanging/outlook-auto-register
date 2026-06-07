@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Full Pipeline: Register Outlook Account → Get Refresh Token → Save 4 Credentials
 1. Register via 邮箱注册 (Selenium + proxy)
@@ -106,22 +106,27 @@ def start_callback_server(port):
 
 # ── CDP Browser Automation ──
 def kill_chrome():
+    """Kill only chrome/chromedriver processes (not Xvfb) — use timeout to pre"""
     subprocess.run(["pkill", "-9", "-f", "undetected"], capture_output=True)
     subprocess.run(["pkill", "-9", "-f", "chromedriver"], capture_output=True)
     subprocess.run(["pkill", "-9", "-f", "google-chrome"], capture_output=True)
-    subprocess.run(["pkill", "-9", "-f", "Xvfb"], capture_output=True)
     time.sleep(2)
     subprocess.run(["bash", "-c", "kill -9 $(pgrep -f chrome) 2>/dev/null; kill -9 $(pgrep -f Xvfb) 2>/dev/null; true"], capture_output=True)
     time.sleep(1)
 
 def start_chrome():
+    """Start Chrome with CDP. Uses existing Xvfb if DISPLAY is set."""
     kill_chrome()
     cdp_port = find_free_port()
-    xvfb = subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1280x720x24"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if "DISPLAY" in os.environ:
+        xvfb = None
+    else:
+        xvfb = subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1280x720x24"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1)
     env = os.environ.copy()
-    env["DISPLAY"] = ":99"
+    if "DISPLAY" not in os.environ:
+        env["DISPLAY"] = ":99"
     chrome = subprocess.Popen([
         "/usr/bin/google-chrome",
         "--remote-debugging-port=%d" % cdp_port,
@@ -136,7 +141,8 @@ def start_chrome():
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     time.sleep(5)
     if chrome.poll() is not None:
-        xvfb.terminate()
+        if xvfb:
+            xvfb.terminate()
         raise RuntimeError(f"Chrome exited {chrome.returncode}")
     return chrome, xvfb, cdp_port
 
@@ -168,17 +174,25 @@ def cdp_eval(ws_url, expr):
     return result.get("result", {}).get("result", {}).get("value", "")
 
 def type_text(ws_url, text):
-    import websocket
-    for ch in text:
-        ws = websocket.create_connection(ws_url, timeout=5)
-        ws.send(json.dumps({"id": 1, "method": "Input.dispatchKeyEvent",
-                             "params": {"type": "keyDown", "text": ch, "key": ch}}))
-        ws.settimeout(2); ws.recv(); ws.close()
-        ws = websocket.create_connection(ws_url, timeout=5)
-        ws.send(json.dumps({"id": 1, "method": "Input.dispatchKeyEvent",
-                             "params": {"type": "keyUp", "key": ch}}))
-        ws.settimeout(2); ws.recv(); ws.close()
-        time.sleep(0.03)
+    """Type text using CDP keyDown/keyUp (matches CDPBrowser.type_text for React)."""
+    import websocket, random
+    ws = websocket.create_connection(ws_url, timeout=30)
+    msg_id = 0
+    for char in text:
+        msg_id += 1
+        code = f"Key{char.upper()}" if char.isalpha() else ""
+        vk = ord(char.upper()) if char.isalpha() else 0
+        ws.send(json.dumps({"id": msg_id, "method": "Input.dispatchKeyEvent",
+                             "params": {"type": "keyDown", "text": char, "key": char,
+                                         "code": code, "windowsVirtualKeyCode": vk}}))
+        ws.recv()
+        msg_id += 1
+        ws.send(json.dumps({"id": msg_id, "method": "Input.dispatchKeyEvent",
+                             "params": {"type": "keyUp", "key": char, "code": code}}))
+        ws.recv()
+        time.sleep(random.uniform(0.04, 0.12))
+    ws.close()
+    time.sleep(0.3)
 
 def click_element(ws_url, selector):
     coords = cdp_eval(ws_url, """(function(){
@@ -280,6 +294,113 @@ def verify_account(email, password):
 
 
 # ── Step 3: Get RT via Auth Code Flow + PKCE + CDP ──
+def handle_account_picker(ws_url, email=""):
+    """检测并处理 OAuth 账号选择页。
+    
+    如果页面是账号选择页(pick an account)，尝试：
+    1. 点击匹配的目标邮箱
+    2. 如果没找到，点击「使用其他帐户」
+    3. 如果都没有，点击页面中央区域
+    
+    Returns:
+        True 如果检测到账号选择页并已处理, False 如果不是账号选择页
+    """
+    body = cdp_eval(ws_url, "document.body ? document.body.innerText.substring(0,1000) : ''")
+    body_lower = body.lower()
+    
+    # 检测账号选择页特征 — 严格模式
+    picker_keywords = ["pick an account", "choose account", "选择帐户", "选择账户", 
+                       "pick account", "sign in with", "选择一个帐户", "选择一个账户"]
+    is_picker = any(kw in body_lower for kw in picker_keywords)
+    
+    if not is_picker:
+        return False
+    
+    # 二次确认：排除密码页/邮箱输入页误判
+    has_pwd = find_input(ws_url, ["#i0118", "input[name='passwd']", "input[type='password']"])
+    has_email = find_input(ws_url, ["#i0116", "input[name='loginfmt']", "input[autocomplete='username']"])
+    if has_pwd or has_email:
+        log.info("[RT] 页面有输入框，不是账号选择页（pwd=%s, email=%s）", has_pwd, has_email)
+        return False
+    
+    log.info("[RT] 检测到账号选择页")
+    
+    # 策略1: 如果有目标邮箱，尝试点击匹配的账号磁贴
+    if email:
+        email_lower = email.lower()
+        email_prefix = email.split('@')[0].lower()
+        pos = cdp_eval(ws_url, f"""(() => {{
+            const email = "{email_lower}";
+            const emailPrefix = "{email_prefix}";
+            // 查找包含邮箱的最小面积元素
+            const els = [...document.querySelectorAll("div, button, a, tr, td, span, li, p, [role=listitem], [role=option]")];
+            let best = null; let bestArea = Infinity;
+            for (const el of els) {{
+                const t = (el.textContent || "").trim().toLowerCase();
+                if (!t || (!t.includes(email) && !t.includes(emailPrefix))) continue;
+                const r = el.getBoundingClientRect();
+                if (r.width < 30 || r.height < 10) continue;
+                const area = r.width * r.height;
+                if (area < bestArea) {{ bestArea = area; best = el; }}
+            }}
+            if (best) {{
+                const r = best.getBoundingClientRect();
+                return JSON.stringify({{x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2), text: best.textContent.trim().substring(0,40)}});
+            }}
+            // data-email / data-upn 属性
+            const emailEls = document.querySelectorAll("[data-email], [data-upn]");
+            for (const el of emailEls) {{
+                const e = (el.getAttribute("data-email") || el.getAttribute("data-upn") || "").toLowerCase();
+                if (e.includes(email) || e.includes(emailPrefix)) {{
+                    const r = el.getBoundingClientRect();
+                    return JSON.stringify({{x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2), text: e.substring(0,40)}});
+                }}
+            }}
+            return null;
+        }})()""")
+        
+        if pos and pos != "null":
+            try:
+                pos_data = json.loads(pos)
+                log.info("[RT] 找到目标账号: '%s' at (%d,%d)", pos_data.get('text',''), pos_data['x'], pos_data['y'])
+                click_element(ws_url, f"[data-email*='{email_prefix}'], [data-upn*='{email_prefix}']")
+                time.sleep(3)
+                return True
+            except Exception as e:
+                log.warning("[RT] 账号点击失败: %s", e)
+    
+    # 策略2: 点击「使用其他帐户」
+    another_account = cdp_eval(ws_url, """(() => {
+        const keywords = ['use another account', '使用其他帐户', '使用其他账户', 
+                          '选择其他帐户', '选择其他账户', 'use a different account',
+                          '其他帐户', 'other account', 'another account'];
+        const els = [...document.querySelectorAll('a, button, div, span, p')];
+        for (const el of els) {
+            const t = (el.textContent || '').trim().toLowerCase();
+            if (t && keywords.some(kw => t.includes(kw))) {
+                const r = el.getBoundingClientRect();
+                if (r.width > 10 && r.height > 10 && r.y > 0) {
+                    el.click();
+                    return 'clicked: ' + t.substring(0, 50);
+                }
+            }
+        }
+        return null;
+    })()""")
+    
+    if another_account and another_account != "null":
+        log.info("[RT] 点击「使用其他帐户」: %s", another_account)
+        time.sleep(3)
+        return True
+    
+    # 策略3: 兜底 — 点击页面中央偏上区域（账号磁贴通常在那）
+    log.info("[RT] 未找到明确按钮，点击页面中央区域")
+    cdp_eval(ws_url, "(() => { document.elementFromPoint(640, 300)?.click(); return 'clicked center'; })()")
+    time.sleep(3)
+    return True
+
+
+# ── Step 3: Get RT via Auth Code Flow + PKCE + CDP ──
 def get_rt_auth_code(email, password):
     """Get RT using Auth Code Flow + PKCE + CDP automation."""
     code_verifier, code_challenge = make_pkce_pair()
@@ -317,9 +438,28 @@ def get_rt_auth_code(email, password):
         body = cdp_eval(ws_url, "document.body ? document.body.innerText.substring(0,500) : ''")
         log.info(f"Page: {body[:80]}")
 
+        # ── 新增: 处理账号选择页 ──
+        if handle_account_picker(ws_url, email):
+            log.info("[RT] 账号选择页已处理，等待页面跳转...")
+            time.sleep(5)
+            body = cdp_eval(ws_url, "document.body ? document.body.innerText.substring(0,500) : ''")
+            log.info(f"After picker: {body[:80]}")
+
         # Check if already on password page (login_hint pre-filled email)
         pwd_sel = find_input(ws_url, ["#i0118", "input[name='passwd']", "input[type='password']"])
         email_sel = find_input(ws_url, ["#i0116", "input[name='loginfmt']", "input[autocomplete='username']"])
+
+        # 如果既没有密码框也没有邮箱输入框，可能是账号选择页未完全处理，重试
+        if not pwd_sel and not email_sel:
+            for retry in range(3):
+                log.info(f"[RT] 未找到输入框，重试 {retry+1}/3...")
+                time.sleep(3)
+                if handle_account_picker(ws_url, email):
+                    time.sleep(5)
+                pwd_sel = find_input(ws_url, ["#i0118", "input[name='passwd']", "input[type='password']"])
+                email_sel = find_input(ws_url, ["#i0116", "input[name='loginfmt']", "input[autocomplete='username']"])
+                if pwd_sel or email_sel:
+                    break
 
         # If on email page, enter email
         if email_sel and not pwd_sel:
@@ -337,15 +477,64 @@ def get_rt_auth_code(email, password):
             log.error("No password field found")
             return None
 
-        # Enter password
-        cdp_eval(ws_url, f"document.querySelector('{pwd_sel}').focus()")
-        time.sleep(0.3)
-        type_text(ws_url, password)
+        # Enter password — click input to focus, then type
+        import websocket as _ws_mod, random as _rnd
+        _ws = _ws_mod.create_connection(ws_url, timeout=30)
+        _mid = 0
+        def _cmd(method, params):
+            nonlocal _mid
+            _mid += 1
+            _ws.send(json.dumps({"id": _mid, "method": method, "params": params}))
+            _ws.settimeout(10)
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                resp = json.loads(_ws.recv())
+                if resp.get("id") == _mid:
+                    return resp
+            return resp
+
+        # Click on password field to give it keyboard focus
+        coords = cdp_eval(ws_url, """(function(){
+            var el = document.querySelector('%s');
+            if(!el || el.offsetHeight===0) return "NO";
+            var r = el.getBoundingClientRect();
+            return JSON.stringify({x:Math.round(r.x+r.width/2), y:Math.round(r.y+r.height/2)});
+        })()""" % pwd_sel.replace("'", "\\'"))
+        if coords != "NO":
+            pos = json.loads(coords)
+            _cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": pos["x"], "y": pos["y"], "button": "left", "clickCount": 1})
+            _cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": pos["x"], "y": pos["y"], "button": "left", "clickCount": 1})
+            time.sleep(0.3)
+        else:
+            # Fallback: JS focus
+            _cmd("Runtime.evaluate", {"expression": f"document.querySelector('{pwd_sel}').focus()", "returnByValue": True})
+            time.sleep(0.3)
+
+        # Type password character by character
+        for ch in password:
+            code = f"Key{ch.upper()}" if ch.isalpha() else ""
+            vk = ord(ch.upper()) if ch.isalpha() else 0
+            _cmd("Input.dispatchKeyEvent", {"type": "keyDown", "text": ch, "key": ch, "code": code, "windowsVirtualKeyCode": vk})
+            _cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": ch, "code": code})
+            time.sleep(_rnd.uniform(0.04, 0.12))
+
+        # Trigger React change
+        _cmd("Runtime.evaluate", {"expression": """(() => {
+            const el = document.querySelector('%s');
+            if (el) {
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                el.dispatchEvent(new Event('blur', {bubbles: true}));
+            }
+        })()""" % pwd_sel.replace("'", "\\'"), "returnByValue": True})
+        _ws.close()
         time.sleep(0.5)
+
         pwd_val = cdp_eval(ws_url, "document.querySelector('" + pwd_sel + "').value")
         log.info(f"Password: {len(pwd_val)} chars")
 
         click_submit(ws_url)
+        time.sleep(10)
         time.sleep(10)
 
         body = cdp_eval(ws_url, "document.body ? document.body.innerText.substring(0,500) : ''")
@@ -371,8 +560,26 @@ def get_rt_auth_code(email, password):
 
         # Handle consent
         body = cdp_eval(ws_url, "document.body ? document.body.innerText.substring(0,500) : ''")
-        if "accept" in body.lower() or "consent" in body.lower():
-            click_submit(ws_url)
+        body_low = body.lower()
+        consent_kws = ["accept", "consent", "allow", "let this app access", "access your info", "授权", "同意"]
+        if any(kw in body_low for kw in consent_kws):
+            log.info("[RT] Detected consent page, clicking accept/allow...")
+            # Try to find and click the accept/allow button specifically
+            clicked = cdp_eval(ws_url, """(() => {
+                const kws = ['accept', 'allow', 'consent', 'ok', 'yes', '授权', '同意'];
+                const btns = [...document.querySelectorAll('button, input[type="submit"], a')];
+                for (const btn of btns) {
+                    const t = (btn.textContent || btn.value || '').trim().toLowerCase();
+                    if (t && kws.some(kw => t.includes(kw))) {
+                        const r = btn.getBoundingClientRect();
+                        if (r.width > 10 && r.height > 10) { btn.click(); return 'clicked: ' + t; }
+                    }
+                }
+                return null;
+            })()""")
+            log.info(f"[RT] Consent click: {clicked}")
+            if not clicked:
+                click_submit(ws_url)
             time.sleep(5)
 
         # Wait for callback
@@ -403,7 +610,8 @@ def get_rt_auth_code(email, password):
     finally:
         try:
             chrome.terminate()
-            xvfb.terminate()
+            if xvfb:
+                xvfb.terminate()
         except:
             pass
 

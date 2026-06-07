@@ -1,4 +1,4 @@
-﻿"""
+"""
 CDP (Chrome DevTools Protocol) Browser Module
 
 Launches a clean Chrome browser without automation flags and connects via CDP.
@@ -550,6 +550,7 @@ class CDPBrowser:
                     args,
                     stdout=subprocess.DEVNULL,
                     stderr=chrome_err_file,
+                    env=os.environ | {"DISPLAY": ":98"}
                 )
                 # 等待一小段时间让Chrome进程稳定，再启动下一个
                 time.sleep(2)

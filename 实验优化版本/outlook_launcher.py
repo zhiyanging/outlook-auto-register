@@ -188,17 +188,32 @@ def run_once(proxy: str, browser: str = "chrome", extract_rt: bool = True, slot_
         browser_type=browser,
         proxy=proxy or "",
         headless=False,
-        extract_rt=extract_rt,
-        keep_browser_open=False,
+        extract_rt=False,
+        keep_browser_open=True,
         slot_index=slot_index,
     )
+
+    # ── 注册成功后，用 rt_from_cdp_browser 获取 RT（复用同一浏览器）──
+    rt = ""
+    if result.success and result.email and result.password:
+        log.info("注册成功 %s，用 rt_from_cdp_browser 方式获取 RT...", result.email)
+        try:
+            from 邮箱注册.rt_from_cdp_browser import get_rt_from_cdp_browser
+            rt = get_rt_from_cdp_browser(result.browser, result.email, result.password)
+            if rt:
+                log.info("RT 获取成功: %d chars", len(rt))
+            else:
+                log.warning("RT 获取失败（注册已成功）")
+        except Exception as rt_exc:
+            log.warning("RT 获取异常: %s", rt_exc)
+
     record = {
         "ts": dt.datetime.now().isoformat(),
         "success": bool(result.success),
         "email": result.email,
         "password": result.password,
         "client_id": result.client_id,
-        "refresh_token": result.refresh_token,
+        "refresh_token": rt or result.refresh_token or "",
         "error": result.error,
         "final_url": result.final_url,
         "final_state": result.final_state,

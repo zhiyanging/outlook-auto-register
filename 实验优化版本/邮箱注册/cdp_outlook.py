@@ -2296,18 +2296,52 @@ def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-29
                     f' }}'
                     f' return null; }})()'
                 )
+                clicked_email = False
                 if pos:
                     try:
                         pos_data = json.loads(pos)
                         logger.info("[RT] 找到账号: '%s' at (%d,%d)", pos_data.get('text',''), pos_data['x'], pos_data['y'])
                         browser.click_at(pos_data['x'], pos_data['y'])
+                        clicked_email = True
                     except Exception as e:
                         logger.warning("[RT] 账号点击失败: %s", e)
                 else:
                     logger.warning("[RT] 未找到账号元素，点击页面中央")
-                    # 兜底：点击页面中央偏上（账号磁贴通常在这个区域）
                     browser.evaluate("(() => { document.elementFromPoint(640, 300)?.click(); return true; })()")
+                    clicked_email = True
                 time.sleep(3)
+
+                # 检查点击是否生效：页面是否仍在账号选择页或出现错误
+                check_body = browser.get_body_text().lower()
+                still_picker = any(kw in check_body for kw in ["选择帐户", "选择账户", "pick an account", "choose account"])
+                has_error = "无法使用此选项" in check_body or "cannot use this option" in check_body or "try another" in check_body
+                if still_picker or has_error:
+                    logger.info("[RT] 点击邮箱后仍在选择页或出现错误，尝试点击「使用其他帐户」")
+                    another = browser.evaluate(
+                        "() => {"
+                        "  const kws = ['use another account', '使用其他帐户', '使用其他账户',"
+                        "    '选择其他帐户', '选择其他账户', 'use a different account',"
+                        "    '其他帐户', 'other account', 'another account', '登录其他帐户', '登录其他账户'];"
+                        "  const els = [...document.querySelectorAll('a, button, div, span, p')];"
+                        "  for (const el of els) {"
+                        "    const t = (el.textContent || '').trim().toLowerCase();"
+                        "    if (t && kws.some(kw => t.includes(kw))) {"
+                        "      const r = el.getBoundingClientRect();"
+                        "      if (r.width > 10 && r.height > 10 && r.y > 0) {"
+                        "        el.click();"
+                        "        return 'clicked: ' + t.substring(0, 50);"
+                        "      }"
+                        "    }"
+                        "  }"
+                        "  return null;"
+                        "}"
+                    )
+                    if another:
+                        logger.info("[RT] 点击「使用其他帐户」: %s", another)
+                        time.sleep(3)
+                    else:
+                        logger.warning("[RT] 未找到「使用其他帐户」，等待页面变化")
+                        time.sleep(2)
                 continue
 
             # ── 2.5. 密码输入页：微软可能要求重新输入密码确认身份 ──
@@ -2944,10 +2978,15 @@ def register_outlook_account(
                     try:
                         # 传入代理 URL，用于 token 交换请求（带认证的完整代理 URL）
                         _rt_proxy = proxy_info.url if proxy_info and proxy_info.has_auth else (proxy_url if proxy_url else "")
-                        rt = _extract_refresh_token(browser, account.email, account.client_id or "14d82eec-204b-4c2f-b7e8-296a70dab67e", password=account.password, proxy_url=_rt_proxy)
+                        try:
+                            from full_pipeline import get_rt_auth_code
+                            rt = get_rt_auth_code(account.email, account.password)
+                        except Exception as _import_err:
+                            logger.warning("[CDP_REG] import get_rt_auth_code failed: %s, fallback to _extract_refresh_token", _import_err)
+                            rt = _extract_refresh_token(browser, account.email, account.client_id or "14d82eec-204b-4c2f-b7e8-296a70dab67e", password=account.password, proxy_url=_rt_proxy)
                         result.refresh_token = rt
-                        if rt: logger.info("[CDP_REG] RT 获取成功: %s...", rt[:30])
-                        else: logger.warning("[CDP_REG] RT 获取失败（注册已成功）")
+                        if rt: logger.info("[CDP_REG] RT obtained: %s...", rt[:30])
+                        else: logger.warning("[CDP_REG] RT failed (registration succeeded)")
                     except Exception as rt_exc:
                         logger.warning("[CDP_REG] RT 获取异常: %s", rt_exc)
                 break
@@ -3058,7 +3097,8 @@ def register_outlook_account(
                     if extract_rt and browser:
                         try:
                             _rt_proxy = proxy_info.url if proxy_info and proxy_info.has_auth else (proxy_url if proxy_url else "")
-                            rt = _extract_refresh_token(browser, account.email, account.client_id or "14d82eec-204b-4c2f-b7e8-296a70dab67e", password=account.password, proxy_url=_rt_proxy)
+                            from full_pipeline import get_rt_auth_code as _get_rt
+                            rt = _get_rt(account.email, account.password)
                             result.refresh_token = rt
                             if rt: logger.info("[CDP_REG] RT 获取成功: %s...", rt[:30])
                         except Exception as rt_exc:
