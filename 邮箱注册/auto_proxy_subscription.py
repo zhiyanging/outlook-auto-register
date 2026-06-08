@@ -52,6 +52,47 @@ def has_working_proxy() -> bool:
         return False
 
 
+def register_via_hidexx_cli(log_fn: Callable[[str], None]) -> str | None:
+    """Fallback: call hidexx-linux daily --line 1 and parse a fresh subscription URL."""
+    import re
+    import subprocess
+
+    bin_path = Path(os.getenv("HIDEXX_BIN", "/home/workspace/hidexx/hidexx-linux"))
+    if not bin_path.exists():
+        log_fn(f"hidexx CLI 不存在: {bin_path}")
+        return None
+    for attempt in range(3):
+        log_fn(f"hidexx CLI 注册新账号 attempt {attempt + 1}/3")
+        try:
+            proc = subprocess.run(
+                [str(bin_path), "daily", "--line", "1"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            urls = re.findall(r"https?://[^\s<>'\"\)]+", out)
+            yaml_urls = [
+                u.strip().rstrip(",.;")
+                for u in urls
+                if ".yaml" in u and "hidexx" not in u.lower()
+            ]
+            seen: set[str] = set()
+            unique = []
+            for url in yaml_urls:
+                if url not in seen:
+                    seen.add(url)
+                    unique.append(url)
+            if unique:
+                log_fn(f"hidexx CLI 获取到 {len(unique)} 个订阅链接")
+                return unique[0]
+            log_fn(f"hidexx CLI 未输出可用订阅，exit={proc.returncode}")
+        except Exception as exc:
+            log_fn(f"hidexx CLI 异常: {exc}")
+        time.sleep(10)
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="自动注册代理新账号并更新 mihomo 订阅")
     parser.add_argument("--force", action="store_true", help="不检测现有订阅，强制注册新账号并更新订阅")
@@ -64,6 +105,9 @@ def main() -> int:
         return 0
 
     url = register_and_get_subscription(log=log, proxy_url=args.proxy or None)
+    if not url:
+        log("API 注册未获取到订阅，尝试 hidexx-linux CLI fallback")
+        url = register_via_hidexx_cli(log)
     if not url:
         log("未获取到新订阅链接")
         return 1
