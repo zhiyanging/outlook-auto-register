@@ -68,51 +68,26 @@ def action_register_5() -> dict:
 
 
 def action_fetch_rt() -> dict:
-    """为最近注册成功的账号获取 RT"""
+    """为最近注册成功的账号获取 RT（device-code 流程）"""
     save_status({"phase": "rt_fetch", "phase_message": "正在获取 refresh_token..."})
     code, out, err = _run(
-        [sys.executable, "-c", """
-import json, sys, os
-sys.path.insert(0, "邮箱注册")
-os.environ["SUB_PROXY_FAST_START"]="1"
-from subscription_proxy import get_manager
-proxy = get_manager().proxy_url or ""
-from pathlib import Path
-p = Path("runtime_outlook/results.jsonl")
-target = None
-for l in reversed(p.read_text().splitlines()):
-    if not l.strip(): continue
-    d = json.loads(l)
-    if d.get("success") and d.get("email") and not d.get("refresh_token"):
-        target = d; break
-if not target:
-    print("ERROR: 没有已注册但缺 RT 的账号"); sys.exit(1)
-from cdp_outlook import _extract_refresh_token, CDPBrowser, CDPLaunchConfig
-cfg = CDPLaunchConfig(browser_type="chrome", proxy=proxy, headless=False)
-b = CDPBrowser(cfg); b.start()
-try:
-    rt = _extract_refresh_token(b, target["email"], password=target.get("password",""), proxy_url=proxy)
-    if rt:
-        # 回写 results.jsonl
-        lines = p.read_text().splitlines()
-        for i in range(len(lines)-1, -1, -1):
-            d2 = json.loads(lines[i])
-            if d2.get("email") == target["email"] and not d2.get("refresh_token"):
-                d2["refresh_token"] = rt
-                lines[i] = json.dumps(d2, ensure_ascii=False)
-                break
-        p.write_text("\\n".join(lines))
-        print(f"RT_OK: {rt[:30]}... email={target['email']}")
-    else:
-        print("RT_EMPTY")
-finally:
-    b.stop()
-"""],
-        timeout=180,
+        [sys.executable, str(ROOT / "deploy" / "fetch_rt_device_code.py")],
+        timeout=300,
     )
     ok = code == 0 and "RT_OK" in out
-    save_status({"phase": "idle", "phase_message": f"RT 获取{'成功' if ok else '失败'}"})
-    return {"ok": ok, "msg": f"RT {'成功' if ok else '失败'}", "output": out[-500:]}
+    # 提取 device-code URL 和 code
+    dc_url = ""
+    dc_code = ""
+    for line in out.splitlines():
+        if "https://www.microsoft.com/link" in line:
+            dc_url = line.split()[-1] if "：" in line else line
+        if "验证码：" in line or "user_code:" in line:
+            dc_code = line.split("：")[-1].split(":")[-1].strip()
+    msg = f"RT 获取{'成功' if ok else '失败'}"
+    if dc_url:
+        msg += f" | 请访问 {dc_url} 输入 {dc_code}"
+    save_status({"phase": "idle", "phase_message": msg})
+    return {"ok": ok, "msg": msg, "output": out[-800:]}
 
 
 def action_push_github() -> dict:

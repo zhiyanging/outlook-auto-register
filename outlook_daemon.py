@@ -94,6 +94,19 @@ def sync_credentials(push: bool = True) -> None:
     log.info("sync exit=%s", code)
 
 
+def post_register_fetch_rt() -> None:
+    """注册后自动获取 refresh_token。"""
+    save_status({"phase": "fetching_rt", "phase_message": "注册完成，自动获取 refresh_token"})
+    env = os.environ.copy()
+    env["DISPLAY"] = DISPLAY_ID
+    cmd = [
+        sys.executable, "-u", str(ROOT / "post_register_fetch_rt.py"),
+        "--limit", "10", "--timeout", "90", "--display", DISPLAY_ID,
+    ]
+    code = run(cmd, timeout=1800, env=env)
+    log.info("post_register_fetch_rt exit=%s", code)
+
+
 def register_batch() -> None:
     save_status({"phase": "registering", "phase_message": f"串行注册 {REGISTER_COUNT} 个 Outlook 账号"})
     ensure_xvfb()
@@ -112,6 +125,11 @@ def register_batch() -> None:
         "last_batch_exit_code": code,
         "last_batch_finished_iso": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ended)),
     })
+    # 注册后自动获取 RT
+    try:
+        post_register_fetch_rt()
+    except Exception as exc:
+        log.warning("post_register_fetch_rt failed: %s", exc)
     sync_credentials(push=True)
 
 

@@ -113,6 +113,11 @@ def main(push: bool = False):
                 four_dir = FOUR / day
                 four_dir.mkdir(parents=True, exist_ok=True)
                 (four_dir / safe_name(email)).write_text(f"{email}----{d['password']}----{client_id}----{rt}\n", encoding="utf-8")
+                # Clean up 三凭证 if exists
+                for td in THREE.iterdir():
+                    tf = td / safe_name(email)
+                    if tf.exists():
+                        tf.unlink()
                 update_jsonl_record(email, True)
                 rt_status[email] = True
                 upgraded.append(email)
@@ -121,9 +126,12 @@ def main(push: bool = False):
         four_dir = FOUR / day
         three_dir.mkdir(parents=True, exist_ok=True)
         four_dir.mkdir(parents=True, exist_ok=True)
-        (three_dir / safe_name(email)).write_text(f"{email}----{d['password']}----{client_id}\n", encoding="utf-8")
         if rt:
+            # Has RT → only write 四凭证, skip 三凭证
             (four_dir / safe_name(email)).write_text(f"{email}----{d['password']}----{client_id}----{rt}\n", encoding="utf-8")
+        else:
+            # No RT → write 三凭证 only
+            (three_dir / safe_name(email)).write_text(f"{email}----{d['password']}----{client_id}\n", encoding="utf-8")
         record = {"ts": ts, "email": email, "password": d["password"], "client_id": client_id, "has_refresh_token": bool(rt), "source": "runtime_outlook/results.jsonl"}
         with ALL.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -139,6 +147,11 @@ def main(push: bool = False):
             four_dir = FOUR / day
             four_dir.mkdir(parents=True, exist_ok=True)
             (four_dir / safe_name(email)).write_text(f"{email}----{pw}----{cid}----{token}\n", encoding="utf-8")
+            # Clean up 三凭证 if exists
+            for td in THREE.iterdir():
+                tf = td / safe_name(email)
+                if tf.exists():
+                    tf.unlink()
             update_jsonl_record(email, True)
             rt_status[email] = True
             upgraded.append(email)
