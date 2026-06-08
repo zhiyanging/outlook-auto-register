@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import json, datetime as dt, subprocess
+import json, datetime as dt, subprocess, os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 RESULTS = ROOT / "runtime_outlook" / "results.jsonl"
 RESULTS2 = ROOT / "自动化定时注册Outlook邮箱" / "runtime_outlook" / "results.jsonl"
 CLOUD = ROOT / "云端注册邮箱"
+CLOUD_REMOTE = os.environ.get("CLOUD_REGISTER_EMAIL_REMOTE", "git@github.com:xingluoyuankong/cloud-register-email.git")
 THREE = CLOUD / "三凭证"
 FOUR = CLOUD / "四凭证"
 ALL = CLOUD / "all_success.jsonl"
@@ -171,8 +172,7 @@ def main(push: bool = False):
         git_dir = CLOUD / ".git"
         if not git_dir.exists():
             subprocess.run(["git", "-C", str(CLOUD), "init"], check=False)
-            subprocess.run(["git", "-C", str(CLOUD), "remote", "add", "origin",
-                           "https://github.com/xingluoyuankong/cloud-register-email.git"], check=False)
+            subprocess.run(["git", "-C", str(CLOUD), "remote", "add", "origin", CLOUD_REMOTE], check=False)
         subprocess.run(["git", "-C", str(CLOUD), "add", "."], check=True)
         staged = subprocess.check_output(["git", "-C", str(CLOUD), "diff", "--cached", "--name-only"], text=True)
         if staged.strip():
