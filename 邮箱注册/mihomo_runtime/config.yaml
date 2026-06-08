@@ -31,331 +31,86 @@ mixed-port: 28888
 mode: global
 proxies:
 - cipher: aes-256-cfb
-  name: 日本域名快速线路01
+  name: 原clash订阅已过期
   obfs: http_simple
   obfs-param: bing.com
-  password: e5005128
-  port: 26319
+  password: crossxx
+  port: 8890
   protocol: origin
   protocol-param: ''
-  server: jp01.vipssr.top
+  server: baidu.com
   type: ssr
 - cipher: aes-256-cfb
-  name: 日本域名快速线路02
+  name: 或者服务器无法访问
   obfs: http_simple
   obfs-param: bing.com
-  password: e5005128
-  port: 26319
+  password: crossxx
+  port: 8890
   protocol: origin
   protocol-param: ''
-  server: hk01.vipssr.top
+  server: baidu.com
   type: ssr
 - cipher: aes-256-cfb
-  name: 日本ip快速线路01
+  name: 搜索倚天剑clash
   obfs: http_simple
   obfs-param: bing.com
-  password: e5005128
-  port: 26319
+  password: crossxx
+  port: 8890
   protocol: origin
   protocol-param: ''
-  server: 45.77.128.83
+  server: baidu.com
   type: ssr
 - cipher: aes-256-cfb
-  name: 日本ip快速线路02
+  name: 或登录https://a.aiguobit.com
   obfs: http_simple
   obfs-param: bing.com
-  password: e5005128
-  port: 26319
+  password: crossxx
+  port: 8890
   protocol: origin
   protocol-param: ''
-  server: 45.77.24.51
+  server: baidu.com
   type: ssr
 - cipher: aes-256-cfb
-  name: 香港域名快速线路01
+  name: 备用https://a.hidexx.com
   obfs: http_simple
   obfs-param: bing.com
-  password: e5005128
-  port: 26319
+  password: crossxx
+  port: 8890
   protocol: origin
   protocol-param: ''
-  server: hk02.vipssr.top
+  server: baidu.com
   type: ssr
 - cipher: aes-256-cfb
-  name: 香港ip快速线路01
+  name: 打开https://github.com/crossxx-labs/free-proxy
   obfs: http_simple
   obfs-param: bing.com
-  password: e5005128
-  port: 26319
+  password: crossxx
+  port: 8890
   protocol: origin
   protocol-param: ''
-  server: 108.61.163.16
+  server: baidu.com
   type: ssr
 - cipher: aes-256-cfb
-  name: 韩国域名快速线路01
+  name: 获取免费账号
   obfs: http_simple
   obfs-param: bing.com
-  password: e5005128
-  port: 26319
+  password: crossxx
+  port: 8890
   protocol: origin
   protocol-param: ''
-  server: kr01.vipssr.top
+  server: baidu.com
   type: ssr
-- cipher: aes-256-cfb
-  name: 韩国ip快速线路01
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: 45.77.128.83
-  type: ssr
-- cipher: aes-256-cfb
-  name: 新加坡域名快速线路01
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: sg01.vipssr.top
-  type: ssr
-- cipher: aes-256-cfb
-  name: 新加坡域名快速线路02
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: sg02.vipssr.top
-  type: ssr
-- cipher: aes-256-cfb
-  name: 新加坡ip快速线路01
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: 45.77.128.83
-  type: ssr
-- cipher: aes-256-cfb
-  name: 新加坡ip快速线路02
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: 104.248.97.234
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国域名快速线路01
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: us01.vipssr.top
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国域名快速线路02
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: us02.vipssr.top
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国域名快速线路03
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: us03.vipssr.top
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国域名快速线路04
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: us04.vipssr.top
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国域名快速线路05
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: us05.vipssr.top
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国域名快速线路06
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: us06.vipssr.top
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国域名快速线路07
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: us07.vipssr.top
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国域名快速线路08
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: us08.vipssr.top
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国ip快速线路01
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: 108.61.163.16
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国ip快速线路02
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: 45.77.128.83
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国ip快速线路03
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: 108.61.163.16
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国ip快速线路04
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: 108.61.163.16
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国ip快速线路05
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: 138.68.39.4
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国ip快速线路06
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: 108.61.163.16
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国ip快速线路07
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: 45.32.86.240
-  type: ssr
-- cipher: aes-256-cfb
-  name: 美国ip快速线路08
-  obfs: http_simple
-  obfs-param: bing.com
-  password: e5005128
-  port: 26319
-  protocol: origin
-  protocol-param: ''
-  server: 45.63.58.201
-  type: ssr
-- name: 日本域名快速线路03
-  password: 26319:e5005128
-  port: 443
-  server: jp03.hys.vipssr.top
-  skip-cert-verify: true
-  type: hysteria2
-- name: 日本ip快速线路03
-  password: 26319:e5005128
-  port: 443
-  server: 66.42.40.60
-  skip-cert-verify: true
-  type: hysteria2
 proxy-groups:
 - interval: 300
   name: AUTO
   proxies:
-  - 日本域名快速线路01
-  - 日本域名快速线路02
-  - 日本ip快速线路01
-  - 日本ip快速线路02
-  - 香港域名快速线路01
-  - 香港ip快速线路01
-  - 韩国域名快速线路01
-  - 韩国ip快速线路01
-  - 新加坡域名快速线路01
-  - 新加坡域名快速线路02
-  - 新加坡ip快速线路01
-  - 新加坡ip快速线路02
-  - 美国域名快速线路01
-  - 美国域名快速线路02
-  - 美国域名快速线路03
-  - 美国域名快速线路04
-  - 美国域名快速线路05
-  - 美国域名快速线路06
-  - 美国域名快速线路07
-  - 美国域名快速线路08
-  - 美国ip快速线路01
-  - 美国ip快速线路02
-  - 美国ip快速线路03
-  - 美国ip快速线路04
-  - 美国ip快速线路05
-  - 美国ip快速线路06
-  - 美国ip快速线路07
-  - 美国ip快速线路08
-  - 日本域名快速线路03
-  - 日本ip快速线路03
+  - 原clash订阅已过期
+  - 或者服务器无法访问
+  - 搜索倚天剑clash
+  - 或登录https://a.aiguobit.com
+  - 备用https://a.hidexx.com
+  - 打开https://github.com/crossxx-labs/free-proxy
+  - 获取免费账号
   tolerance: 100
   type: url-test
   url: http://connect.rom.miui.com/generate_204
