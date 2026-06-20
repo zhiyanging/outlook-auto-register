@@ -1,5 +1,4 @@
 allow-lan: false
-client-fingerprint: chrome
 dns:
   default-nameserver:
   - 223.5.5.5
@@ -8,6 +7,14 @@ dns:
   enable: true
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
+  fallback:
+  - https://dns.google/dns-query
+  - https://cloudflare-dns.com/dns-query
+  fallback-filter:
+    geoip: true
+    geoip-code: CN
+    ipcidr:
+    - 240.0.0.0/4
   ipv6: false
   listen: 127.0.0.1:53553
   nameserver:
@@ -15,20 +22,34 @@ dns:
   - https://doh.pub/dns-query
 external-controller: 127.0.0.1:29090
 find-process-mode: 'off'
-ipv6: false
+global-client-fingerprint: chrome
+ipv6: true
 log-level: info
 mixed-port: 28888
-mode: rule
+mode: global
 proxies:
-- name: WARP-SOCKS5
-  port: 1080
-  server: 127.0.0.1
+- cipher: chacha20-ietf-poly1305
+  name: IPv6香港01ss
+  password: 4251c10e-f273-4d73-9348-61dad545743d
+  port: 8080
+  server: 2401:b60:e0ce:20::1
+  type: ss
+  udp: true
+- name: cliproxy-us-residential
+  password: jz5j2zu5
+  port: 3010
+  server: us.cliproxy.io
   type: socks5
+  username: atll1189414-region-Rand
 proxy-groups:
-- name: AUTO
+- interval: 300
+  name: AUTO
   proxies:
-  - WARP-SOCKS5
-  type: select
+  - IPv6香港01ss
+  - cliproxy-us-residential
+  tolerance: 100
+  type: url-test
+  url: http://connect.rom.miui.com/generate_204
 rules:
 - MATCH,AUTO
 skip-auth: true

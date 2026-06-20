@@ -1,0 +1,20 @@
+[
+  {
+    "proxy": "http://user:pass@1.2.3.4:8080",
+    "name": "1.2.3.4:8080",
+    "added": "2026-06-20 17:24",
+    "active": false
+  },
+  {
+    "proxy": "us.cliproxy.io:3010:atll1189414-region-Rand:jz5j2zu5",
+    "name": "us.cliproxy.io:3010:",
+    "added": "2026-06-20 17:37",
+    "active": false
+  },
+  {
+    "proxy": "socks5://us.cliproxy.io:3010:atll1189414-region-Rand:jz5j2zu5",
+    "name": "socks5://us.cliproxy",
+    "added": "2026-06-20 17:37",
+    "active": false
+  }
+]
