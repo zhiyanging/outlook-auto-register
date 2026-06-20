@@ -16,6 +16,15 @@ from pathlib import Path
 
 from outlook_daemon_status import build_snapshot, save_status
 
+
+# Registration progress tracking
+registration_progress = {
+    'active': False,
+    'percent': 0,
+    'text': '',
+    'logs': []
+}
+
 PORT = int(os.environ.get("OUTLOOK_DASHBOARD_PORT", "8765"))
 ROOT = Path(__file__).resolve().parent
 
@@ -493,19 +502,49 @@ def action_register_1() -> dict:
 
 def action_register_5() -> dict:
     """注册 5 个 Outlook"""
+    global registration_progress
+    registration_progress = {
+        'active': True,
+        'percent': 0,
+        'text': '准备注册 5 个账号...',
+        'logs': []
+    }
     save_status({"phase": "registering", "phase_message": "正在注册 5 个 Outlook 账号..."})
+    
+    registration_progress['logs'].append('开始注册流程')
+    registration_progress['percent'] = 5
+    registration_progress['text'] = '初始化中...'
+    
     code, out, err = _run(
         [sys.executable, "outlook_launcher.py", "run", "--count", "5", "--shuffle", "--max-proxy-attempts", "12"],
         timeout=600,
     )
+    
     ok_count = out.count("成功:")
     fail_count = 5 - ok_count
+    
+    # Parse output for progress
+    lines = out.splitlines()
+    for i, line in enumerate(lines):
+        if '注册' in line or '成功' in line or '失败' in line or '尝试' in line:
+            registration_progress['logs'].append(line)
+    
+    registration_progress['percent'] = 100
+    registration_progress['text'] = f'完成: {ok_count} 成功, {fail_count} 失败'
+    registration_progress['logs'].append(f'注册结束: {ok_count} 成功, {fail_count} 失败')
+    
     save_status({
         "phase": "idle",
         "phase_message": f"注册完成：{ok_count} 成功 / {fail_count} 失败",
         "last_register_ok": ok_count,
         "last_register_fail": fail_count,
     })
+    
+    # Mark as inactive after 3 seconds
+    import time
+    time.sleep(3)
+    registration_progress['active'] = False
+    
     return {"ok": code == 0, "success": ok_count, "fail": fail_count, "output": out[-1200:]}
 
 
@@ -611,6 +650,57 @@ th{color:var(--muted);font-weight:500}
 #toast{position:fixed;top:1rem;right:1rem;background:#1a2332;border:1px solid var(--border);padding:.6rem 1rem;border-radius:10px;font-size:.85rem;display:none;z-index:99;max-width:400px}
 .stat-big{font-size:2rem;font-weight:700;text-align:center}
 .stat-label{font-size:.75rem;color:var(--muted);text-align:center}
+
+/* Progress Bar */
+.progress-container {
+  margin: 1rem 0;
+  display: none;
+}
+.progress-container.active {
+  display: block;
+}
+.progress-bar-wrapper {
+  background: var(--bg-dark);
+  border-radius: 8px;
+  overflow: hidden;
+  height: 32px;
+  position: relative;
+  border: 1px solid var(--border);
+}
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+  transition: width 0.3s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.progress-text {
+  position: absolute;
+  width: 100%;
+  text-align: center;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text);
+  font-weight: 500;
+  pointer-events: none;
+}
+.progress-status {
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  background: var(--bg-dark);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  max-height: 120px;
+  overflow-y: auto;
+  font-family: 'Courier New', monospace;
+  white-space: pre-wrap;
+}
+
 </style>
 </head>
 <body>
@@ -622,7 +712,15 @@ th{color:var(--muted);font-weight:500}
   <div class="card">
     <h2>📊 注册统计</h2>
     <div style="display:flex;justify-content:space-around;text-align:center;padding:.4rem 0">
-      <div><div class="stat-big" style="color:var(--ok)">{{total_registrations}}</div><div class="stat-label">总注册数</div></div>
+      <div><div class="stat-big" style="color:var(--ok)">{{total_registrations}}</div><div class="stat-label">总注册数
+  <div id="reg-progress" class="progress-container">
+    <div class="progress-bar-wrapper">
+      <div class="progress-bar-fill" id="progress-fill" style="width: 0%"></div>
+      <div class="progress-text" id="progress-text">准备中...</div>
+    </div>
+    <div class="progress-status" id="progress-status"></div>
+  </div>
+</div></div>
       <div><div class="stat-big" style="color:var(--accent)">{{today_registrations}}</div><div class="stat-label">今日注册</div></div>
       <div><div class="stat-big" style="color:#c4b5fd">{{total_runtime}}</div><div class="stat-label">运行总时长</div></div>
     </div>
@@ -800,6 +898,8 @@ async function doAction(action) {
   logEl.style.display = 'block';
   logEl.textContent = '正在执行 ' + action + ' ...';
   try {
+
+  pollProgress();
     const d = await api('/api/action/' + action, 'POST');
     if (d.ok) { toast('✅ ' + d.msg); } else { toast('❌ ' + d.msg, 'err'); }
     logEl.textContent = d.output || d.msg;
@@ -1095,6 +1195,72 @@ async function deactivateResidential() {
 
 // ─── 初始化 ───
 loadProxyStatus();
+
+
+// Progress tracking
+let progressTimer = null;
+
+function showProgress() {
+  const container = document.getElementById('reg-progress');
+  if (container) {
+    container.classList.add('active');
+  }
+}
+
+function hideProgress() {
+  const container = document.getElementById('reg-progress');
+  if (container) {
+    container.classList.remove('active');
+  }
+}
+
+function updateProgress(percent, text) {
+  const fill = document.getElementById('progress-fill');
+  const textEl = document.getElementById('progress-text');
+  if (fill) fill.style.width = percent + '%';
+  if (textEl) textEl.textContent = text;
+}
+
+function appendStatus(msg) {
+  const status = document.getElementById('progress-status');
+  if (status) {
+    const time = new Date().toLocaleTimeString();
+    status.textContent += `[${time}] ${msg}\n`;
+    status.scrollTop = status.scrollHeight;
+  }
+}
+
+function clearStatus() {
+  const status = document.getElementById('progress-status');
+  if (status) status.textContent = '';
+}
+
+async function pollProgress() {
+  try {
+    const r = await fetch('/api/register/progress');
+    if (r.ok) {
+      const data = await r.json();
+      if (data.active) {
+        showProgress();
+        updateProgress(data.percent || 0, data.text || '处理中...');
+        if (data.logs && data.logs.length > 0) {
+          clearStatus();
+          data.logs.forEach(log => appendStatus(log));
+        }
+        if (data.percent < 100) {
+          setTimeout(pollProgress, 1000);
+        } else {
+          setTimeout(hideProgress, 3000);
+        }
+      } else {
+        hideProgress();
+      }
+    }
+  } catch(e) {
+    console.error('Progress poll error:', e);
+  }
+}
+
 </script>
 </body>
 </html>
@@ -1234,6 +1400,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/proxy/residential":
             self._json({"residential": _load_residential()})
+            return
+
+        
+        if path == "/api/register/progress":
+            self._json(registration_progress)
             return
 
         self.send_error(404)
