@@ -1,23 +1,35 @@
 [
   {
     "url": "https://sub.hopexx.com/v1/sub/64168/d057733d60b8c45b282b62aeb502c879.yaml",
-    "name": "d057733d60b8c45b282b62aeb502c879"
+    "name": "d057733d60b8c45b282b62aeb502c879",
+    "node_count": 49
   },
   {
     "url": "https://sub.51trojan.com/v1/sub/64172/149d59c33f3a03bb1dea3b188d43a492.yaml",
-    "name": "149d59c33f3a03bb1dea3b188d43a492"
-  },
-  {
-    "url": "https://sf.453521.xyz/api/v1/client/subscribe?token=e655dcfc91180776bd6657c9a0415ee4&flag=meta",
-    "name": "subscribe?token=e655dcfc91180776"
+    "name": "149d59c33f3a03bb1dea3b188d43a492",
+    "node_count": 49
   },
   {
     "url": "https://vostuo.com/s/ad0a21df9c9baa9ba9a76f9fe3aa6118",
-    "name": "vostuo-e3aa6118"
+    "name": "vostuo-e3aa6118",
+    "node_count": 49
   },
   {
     "url": "https://api.wcc.best/sub?target=clash&url=https%3A%2F%2Fb3.342242.icu%2Fapi%2Fv1%2Fclient%2Fsubscribe%3Ftoken%3Dc54872fcc22949cc3209664c7b670b91&insert=false&emoji=true&list=false&tfo=false&scv=true&fdn=false&expand=true&sort=false&new_name=true",
     "name": "sub?target=clash&url=https%3A%2F",
-    "added": "2026-06-20 19:03"
+    "added": "2026-06-20 19:03",
+    "node_count": 49
+  },
+  {
+    "url": "https://sf.453521.xyz/api/v1/client/subscribe?token=e655dcfc91180776bd6657c9a0415ee4&flag=meta",
+    "name": "subscribe?token=e655dcfc91180776",
+    "added": "2026-06-20 19:41",
+    "node_count": 49
+  },
+  {
+    "url": "https://b3.342242.icu/api/v1/client/subscribe?token=c54872fcc22949cc3209664c7b670b91",
+    "name": "subscribe?token=c54872fcc22949cc",
+    "added": "2026-06-20 19:43",
+    "node_count": 49
   }
 ]

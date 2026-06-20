@@ -30,48 +30,6 @@ mode: global
 proxies:
 - client-fingerprint: chrome
   flow: xtls-rprx-vision
-  name: 剩余流量：40.73 GB
-  port: 8443
-  reality-opts:
-    public-key: 2a0ONLRiBeHJdr9qCruq5tPVf8_3c4fmZsg7YQorFSE
-    short-id: 04d59340
-  server: 1sg001.344211.cc
-  servername: www.python.org
-  skip-cert-verify: false
-  tls: true
-  type: vless
-  udp: true
-  uuid: 4251c10e-f273-4d73-9348-61dad545743d
-- client-fingerprint: chrome
-  flow: xtls-rprx-vision
-  name: 距离下次重置剩余：9 天
-  port: 8443
-  reality-opts:
-    public-key: 2a0ONLRiBeHJdr9qCruq5tPVf8_3c4fmZsg7YQorFSE
-    short-id: 04d59340
-  server: 1sg001.344211.cc
-  servername: www.python.org
-  skip-cert-verify: false
-  tls: true
-  type: vless
-  udp: true
-  uuid: 4251c10e-f273-4d73-9348-61dad545743d
-- client-fingerprint: chrome
-  flow: xtls-rprx-vision
-  name: 套餐到期：2027-03-20
-  port: 8443
-  reality-opts:
-    public-key: 2a0ONLRiBeHJdr9qCruq5tPVf8_3c4fmZsg7YQorFSE
-    short-id: 04d59340
-  server: 1sg001.344211.cc
-  servername: www.python.org
-  skip-cert-verify: false
-  tls: true
-  type: vless
-  udp: true
-  uuid: 4251c10e-f273-4d73-9348-61dad545743d
-- client-fingerprint: chrome
-  flow: xtls-rprx-vision
   name: vless新加坡01
   port: 8443
   reality-opts:
@@ -422,13 +380,6 @@ proxies:
   sni: sg25.459921.xyz
   type: hysteria2
   udp: true
-- cipher: chacha20-ietf-poly1305
-  name: IPv6香港01ss
-  password: 4251c10e-f273-4d73-9348-61dad545743d
-  port: 8080
-  server: 2401:b60:e0ce:20::1
-  type: ss
-  udp: true
 - name: 日本01aws
   password: 4251c10e-f273-4d73-9348-61dad545743d
   port: 8081
@@ -497,28 +448,16 @@ proxies:
   sni: 172.105.237.245
   type: hysteria2
   udp: true
-- name: 有20多个节点，不够请到官网使用文档，下载最新的客户端
-  password: 4251c10e-f273-4d73-9348-61dad545743d
-  port: 8080
-  server: 1.1.1.1
-  sni: 1.1.1.1
-  type: trojan
-  udp: true
-- cipher: chacha20-ietf-poly1305
-  name: 🇭🇰 IPv6香港01ss
-  password: e2cf0948-0351-4952-ba9d-0b2202538775
-  port: 8080
-  server: 2401:b60:e0ce:20::1
-  tfo: false
-  type: ss
-  udp: true
 proxy-groups:
+- name: GLOBAL
+  proxies:
+  - AUTO
+  - DIRECT
+  - REJECT
+  type: select
 - interval: 300
   name: AUTO
   proxies:
-  - 剩余流量：40.73 GB
-  - 距离下次重置剩余：9 天
-  - 套餐到期：2027-03-20
   - vless新加坡01
   - 新加坡01
   - 用不了，换个客户端，重新导入订阅，用手机流量试下。
@@ -554,7 +493,6 @@ proxy-groups:
   - 新加坡15aws
   - 新加坡16aws
   - 新加坡25aws
-  - IPv6香港01ss
   - 日本01aws
   - 日本02aws
   - 日本03j
@@ -563,8 +501,6 @@ proxy-groups:
   - IPv6日本05ak
   - IPv6日本08aws
   - IPv6日本09ak
-  - 有20多个节点，不够请到官网使用文档，下载最新的客户端
-  - 🇭🇰 IPv6香港01ss
   tolerance: 100
   type: url-test
   url: http://connect.rom.miui.com/generate_204
