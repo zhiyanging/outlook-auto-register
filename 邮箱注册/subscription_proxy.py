@@ -76,6 +76,7 @@ def _parse_subscription_text(text: str) -> dict:
                         "server": host,
                         "port": port,
                         "uuid": parsed.username or "",
+                        "client-fingerprint": "chrome",
                     })
             elif line.startswith("ss://"):
                 # ss://base64(user:pass)@host:port#name

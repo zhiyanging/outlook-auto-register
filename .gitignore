@@ -1,3 +1,4 @@
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -15,23 +16,40 @@ parts/
 sdist/
 *.egg-info/
 *.egg
+venv/
+.venv/
 
-# Runtime
+# Runtime data (logs, state, screenshots)
 runtime_outlook/
 *.log
 /dev/shm/
+*.tmp
 
-# Credentials (never commit)
+# ============ Credentials (NEVER commit) ============
 *.pem
 *.key
 .env
 .env.*
 
-# OS
-.DS_Store
-Thumbs.db
+# Credential directories (contain account passwords/tokens)
 云端注册邮箱/
 自动化定时注册Outlook邮箱/
 实验优化版本/
+
+# Screenshots and images
 *.png
 *.jpg
+*.jpeg
+*.gif
+*.bmp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
