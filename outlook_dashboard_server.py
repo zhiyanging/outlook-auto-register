@@ -596,11 +596,24 @@ function toast(msg, type='ok') {
 }
 
 // ─── API 调用 ───
+const BASE_PATH = window.location.pathname.startsWith('/api/outlook') ? '/api/outlook' : '';
+
 async function api(path, method='GET', body=null) {
   const opts = { method, headers: {'Content-Type':'application/json'} };
   if (body) opts.body = JSON.stringify(body);
-  const r = await fetch(path, opts);
-  return r.json();
+  try {
+    const r = await fetch(BASE_PATH + path, opts);
+    const ct = r.headers.get('content-type') || '';
+    if (!ct.includes('json')) {
+      const text = await r.text();
+      console.error('Non-JSON response from', BASE_PATH + path, ':', text.substring(0, 200));
+      throw new Error('服务器返回非JSON响应 (HTTP ' + r.status + ')');
+    }
+    return await r.json();
+  } catch(e) {
+    if (e.message && e.message.includes('Non-JSON')) throw e;
+    throw new Error('网络请求失败: ' + e.message);
+  }
 }
 
 // ─── 手动操作 ───
