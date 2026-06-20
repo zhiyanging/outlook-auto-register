@@ -9,6 +9,11 @@ mkdir -p runtime_outlook/logs
 echo "{\"node_id\":\"$NODE_ID\",\"label\":\"Gcore VPS\"}" > runtime_outlook/node_identity.json
 bash deploy/remote_install.sh "$NODE_ID" || true
 
+DAEMON_SCRIPT="$ROOT/outlook_daemon_no_ngrok.sh"
+if [[ "${USE_NGROK_HUB:-0}" == "1" ]]; then
+  DAEMON_SCRIPT="$ROOT/outlook_daemon_with_tunnel.sh"
+fi
+
 UNIT=/etc/systemd/system/outlook-auto-register.service
 sudo tee "$UNIT" >/dev/null <<EOF
 [Unit]
@@ -25,7 +30,11 @@ Environment=PYTHONUNBUFFERED=1
 Environment=OUTLOOK_DASHBOARD_PORT=8765
 Environment=OUTLOOK_REGISTRAR_NODE=$NODE_ID
 Environment=EMAIL_REGISTER_ROOT=$ROOT
-ExecStart=/bin/bash $ROOT/outlook_daemon_no_ngrok.sh
+Environment=USE_NGROK_HUB=${USE_NGROK_HUB:-0}
+Environment=NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN:-}
+Environment=NGROK_DOMAIN=${NGROK_DOMAIN:-}
+Environment=CLOUD_REGISTER_EMAIL_REMOTE=${CLOUD_REGISTER_EMAIL_REMOTE:-}
+ExecStart=/bin/bash $DAEMON_SCRIPT
 Restart=always
 RestartSec=15
 

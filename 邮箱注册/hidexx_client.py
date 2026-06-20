@@ -141,3 +141,79 @@ def register_and_get_subscription(log=print, proxy_url=None):
 
     log("❌ 获取订阅失败")
     return None
+
+
+def register_sso_with_outlook(email: str, password: str, client_id: str, refresh_token: str, log=print) -> str | None:
+    """Register a new aiguobit/hidexx SSO account using an Outlook mailbox to receive email verification code."""
+    import requests
+    from urllib.parse import urlparse, parse_qs
+    from outlook_mail_reader import wait_for_code
+
+    started_at = time.time()
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
+    r = session.get(BASE_URL + "/users/register", timeout=30, allow_redirects=True)
+    q = parse_qs(urlparse(r.url).query)
+    params = {
+        "client_id": q.get("client_id", ["ytj_php"])[0],
+        "redirect_uri": q.get("redirect_uri", [BASE_URL + "/users/register_callback"])[0],
+        "state": q.get("state", [""])[0],
+    }
+    api = "https://sub.aiguobit.com"
+    log(f"SSO 注册参数就绪: {params['client_id']}")
+
+    cr = session.get(api + "/api/sso/register/config", params=params, timeout=30)
+    cr.raise_for_status()
+
+    sr = session.post(api + "/api/sso/register/send-code", json={**params, "email": email}, timeout=30)
+    if sr.status_code >= 400:
+        log(f"发送邮箱验证码失败: HTTP {sr.status_code} {sr.text[:200]}")
+        return None
+    log(f"验证码已发送到 {email}，等待 Outlook 收码...")
+
+    code = wait_for_code(refresh_token, client_id=client_id, timeout=180, interval=10, since_ts=started_at)
+    if not code:
+        log("未读取到邮箱验证码")
+        return None
+    log(f"已读取验证码: {code}")
+
+    vr = session.post(api + "/api/sso/register/verify", json={**params, "email": email, "password": password, "code": code}, timeout=30, allow_redirects=False)
+    if vr.status_code >= 400:
+        log(f"SSO verify 失败: HTTP {vr.status_code} {vr.text[:300]}")
+        return None
+    data = vr.json()
+    redirect_url = data.get("redirect_url")
+    if not redirect_url:
+        log(f"SSO verify 未返回 redirect_url: {data}")
+        return None
+    log("SSO 注册成功，回跳 hidexx...")
+    rr = session.get(redirect_url, timeout=30, allow_redirects=True)
+    log(f"回跳完成: {rr.url}")
+
+    resp = session.get(BASE_URL + "/users/ucenter")
+    html = resp.text
+    sid, checksum = parse_trial_params(html)
+    if not sid:
+        log("领取试用失败")
+        return None
+    form = urllib.parse.urlencode({'sid': sid, 'checksum': checksum, 'line_id': '1', 'quantity': '1'}).encode()
+    resp = session.post(BASE_URL + "/orders/request_day_trial", data=form)
+    final = urllib.parse.unquote(resp.url)
+    body = resp.text
+    if 'success' not in final and '领取成功' not in body and '领取成功' not in final:
+        log("领取试用失败")
+        return None
+    log("领取试用成功，等待订阅生效...")
+    time.sleep(15)
+    for attempt in range(4):
+        resp = session.get(BASE_URL + "/users/ucenter")
+        html = resp.text
+        re_link = re.compile(r"copyText\('([^']+)'\)")
+        matches = re_link.findall(html)
+        subs = [m.replace('&amp;', '&') for m in matches]
+        if subs:
+            log(f"获取到 {len(subs)} 个订阅链接")
+            return subs[0]
+        time.sleep(10)
+    log("未获取到订阅链接")
+    return None

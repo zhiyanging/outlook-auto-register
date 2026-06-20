@@ -14,7 +14,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from hidexx_client import register_and_get_subscription
+from hidexx_client import register_and_get_subscription, register_sso_with_outlook
+from outlook_mail_reader import load_four_credentials
 from subscription_proxy import SUBS_FILE, get_manager
 
 
@@ -22,7 +23,7 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
-def update_subscription(url: str, name: str = "hidexx-auto") -> None:
+def update_subscription(url: str, name: str = "") -> None:
     SUBS_FILE.parent.mkdir(parents=True, exist_ok=True)
     data: list[dict] = []
     if SUBS_FILE.exists():
@@ -30,9 +31,27 @@ def update_subscription(url: str, name: str = "hidexx-auto") -> None:
             data = json.loads(SUBS_FILE.read_text(encoding="utf-8"))
         except Exception:
             data = []
-    data = [s for s in data if s.get("name") != name and s.get("url") != url]
-    data.insert(0, {"name": name, "url": url, "created_at": int(time.time())})
+    now = int(time.time())
+    stale_words = ("已过期", "无法访问", "搜索", "备用", "原clash", "free-proxy")
+    cleaned: list[dict] = []
+    seen: set[str] = {url}
+    for s in data:
+        old_url = str(s.get("url", "")).strip()
+        old_name = str(s.get("name", "")).strip()
+        if not old_url or old_url in seen:
+            continue
+        if old_name == name:
+            continue
+        if any(w in old_name or w in old_url for w in stale_words):
+            continue
+        created_at = int(s.get("created_at") or 0)
+        if created_at and now - created_at > 3 * 24 * 3600:
+            continue
+        seen.add(old_url)
+        cleaned.append(s)
+    data = [{"name": name, "url": url, "created_at": now}] + cleaned[:9]
     SUBS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    log(f"已写入新订阅并清理旧订阅: kept={len(data)} file={SUBS_FILE}")
 
 
 def has_working_proxy() -> bool:
@@ -57,9 +76,16 @@ def register_via_hidexx_cli(log_fn: Callable[[str], None]) -> str | None:
     import re
     import subprocess
 
-    bin_path = Path(os.getenv("HIDEXX_BIN", "/home/workspace/hidexx/hidexx-linux"))
-    if not bin_path.exists():
-        log_fn(f"hidexx CLI 不存在: {bin_path}")
+    root = Path(__file__).resolve().parents[1]
+    candidates = [
+        os.getenv("HIDEXX_BIN", ""),
+        str(root.parent / "hidexx" / "hidexx-linux"),
+        str(Path.home() / "hidexx" / "hidexx-linux"),
+        str(Path.home() / "hidexx" / "hidexx-linux"),
+    ]
+    bin_path = next((Path(x) for x in candidates if x and Path(x).exists()), None)
+    if not bin_path:
+        log_fn("hidexx CLI 不存在，已检查: " + ", ".join(x for x in candidates if x))
         return None
     for attempt in range(3):
         log_fn(f"hidexx CLI 注册新账号 attempt {attempt + 1}/3")
@@ -104,7 +130,21 @@ def main() -> int:
         log("现有代理订阅可用，无需注册新代理账号")
         return 0
 
-    url = register_and_get_subscription(log=log, proxy_url=args.proxy or None)
+    url = None
+    root = Path(__file__).resolve().parents[1]
+    creds = load_four_credentials(root)
+    if creds:
+        max_sso = int(os.getenv("HIDEXX_SSO_MAX_CREDS", "5"))
+        for email, password, client_id, refresh_token in creds[:max_sso]:
+            log(f"尝试 SSO 邮箱验证码注册: {email}")
+            url = register_sso_with_outlook(email, password, client_id, refresh_token, log=log)
+            if url:
+                break
+    if not url:
+        log("未找到可用于收验证码的 Outlook 四凭证")
+
+    if not url:
+        url = register_and_get_subscription(log=log, proxy_url=args.proxy or None)
     if not url:
         log("API 注册未获取到订阅，尝试 hidexx-linux CLI fallback")
         url = register_via_hidexx_cli(log)

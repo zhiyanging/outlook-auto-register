@@ -1,7 +1,8 @@
 #!/bin/bash
 # Outlook 守护 + 实况面板 + ngrok（复用原 cpa-proxy-ngrok 的 ngrok 账号/域名）
 set -u
-ROOT="/home/workspace/Email-Register"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="${EMAIL_REGISTER_ROOT:-$SCRIPT_DIR}"
 cd "$ROOT"
 
 DASH_PID=""
@@ -25,7 +26,18 @@ else
 fi
 
 if [[ -n "${NGROK_AUTHTOKEN:-}" ]] && ! pgrep -f "ngrok http ${OUTLOOK_DASHBOARD_PORT}" >/dev/null 2>&1; then
-  ngrok http "$OUTLOOK_DASHBOARD_PORT" --log=stdout --log-format=logfmt &
+  NGROK_CONFIG="$ROOT/runtime_outlook/ngrok.yml"
+  mkdir -p "$ROOT/runtime_outlook"
+  cat > "$NGROK_CONFIG" <<EOF
+version: "3"
+agent:
+  authtoken: ${NGROK_AUTHTOKEN}
+EOF
+  NGROK_ARGS=("http" "$OUTLOOK_DASHBOARD_PORT" "--authtoken" "$NGROK_AUTHTOKEN" "--log=stdout" "--log-format=logfmt")
+  if [[ -n "${NGROK_DOMAIN:-}" ]]; then
+    NGROK_ARGS+=("--url=https://${NGROK_DOMAIN}")
+  fi
+  ngrok "${NGROK_ARGS[@]}" &
   NGROK_PID=$!
   sleep 3
 else

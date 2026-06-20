@@ -15,7 +15,18 @@ fi
 
 # ngrok
 if [[ -n "${NGROK_AUTHTOKEN:-}" ]] && ! pgrep -f "ngrok http ${OUTLOOK_DASHBOARD_PORT}" >/dev/null 2>&1; then
-  ngrok http "$OUTLOOK_DASHBOARD_PORT" --log=stdout --log-format=logfmt &
+  NGROK_CONFIG="$ROOT/runtime_outlook/ngrok.yml"
+  mkdir -p "$ROOT/runtime_outlook"
+  cat > "$NGROK_CONFIG" <<EOF
+version: "3"
+agent:
+  authtoken: ${NGROK_AUTHTOKEN}
+EOF
+  NGROK_ARGS=("http" "$OUTLOOK_DASHBOARD_PORT" "--authtoken" "$NGROK_AUTHTOKEN" "--log=stdout" "--log-format=logfmt")
+  if [[ -n "${NGROK_DOMAIN:-}" ]]; then
+    NGROK_ARGS+=("--url=https://${NGROK_DOMAIN}")
+  fi
+  ngrok "${NGROK_ARGS[@]}" &
   sleep 3
 fi
 

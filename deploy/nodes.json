@@ -6,17 +6,7 @@
       "label": "Zo-1 · xzxyuan",
       "role": "primary",
       "ssh_host": "local",
-      "dashboard_port": 8765
-    },
-    {
-      "id": "zo2",
-      "handle": "zo2",
-      "label": "Zo-2 · 44.211.220.76",
-      "role": "worker",
-      "ssh_host": "44.211.220.76",
-      "ssh_port": 22,
-      "ssh_user": "root",
-      "key_file": "/home/workspace/zo-mesh/config/keys/zo2-new.pem",
+      "project_dir": "/home/workspace/Email-Register",
       "dashboard_port": 8765
     },
     {
@@ -27,7 +17,9 @@
       "ssh_host": "ts8.zocomputer.io",
       "ssh_port": 10851,
       "ssh_user": "root",
+      "ssh_key": "/home/workspace/zo-mesh/config/keys/zo3-new.pem",
       "key_file": "/home/workspace/zo-mesh/config/keys/zo3-new.pem",
+      "project_dir": "/home/workspace/Email-Register",
       "dashboard_port": 8765
     },
     {
@@ -38,13 +30,28 @@
       "ssh_host": "ts6.zocomputer.io",
       "ssh_port": 10528,
       "ssh_user": "root",
+      "ssh_key": "/home/workspace/zo-mesh/config/keys/zo4-new.pem",
       "key_file": "/home/workspace/zo-mesh/config/keys/zo4-new.pem",
+      "project_dir": "/home/workspace/Email-Register",
+      "dashboard_port": 8765
+    },
+    {
+      "id": "gcore",
+      "handle": "gcore",
+      "label": "Gcore · 31.184.244.145",
+      "role": "worker",
+      "ssh_host": "31.184.244.145",
+      "ssh_port": 22,
+      "ssh_user": "ubuntu",
+      "ssh_key": "/home/workspace/zo-mesh/config/keys/gcore.pem",
+      "key_file": "/home/workspace/zo-mesh/config/keys/gcore.pem",
+      "project_dir": "/home/ubuntu/Email-Register",
       "dashboard_port": 8765
     }
   ],
   "dashboard": {
     "primary_node": "xzxyuan",
     "public_url": "https://scientist-primary-pregnancy.ngrok-free.dev",
-    "policy": "每台节点各自运行前端面板并通过 ngrok 内网穿透；主节点同时汇总多节点状态"
+    "policy": "每台节点各自运行 Outlook 前端面板并通过 ngrok 内网穿透；主节点汇总多节点状态。"
   }
 }

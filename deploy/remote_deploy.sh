@@ -41,12 +41,12 @@ rsync -az -e "$RSYNC_SSH" \
   "${USER}@${HOST}:${DEST}/邮箱注册/mihomo_runtime/subscriptions.json" 2>/dev/null || true
 
 ssh -i "$KEY" -p "$PORT" -o StrictHostKeyChecking=no "${USER}@${HOST}" \
-  "EMAIL_REGISTER_ROOT='$DEST' bash '$DEST/deploy/remote_install.sh' '$NODE'"
+  "OUTLOOK_REGISTRAR_NODE='$NODE' USE_NGROK_HUB='${USE_NGROK_HUB:-1}' NGROK_AUTHTOKEN='${NGROK_AUTHTOKEN:-}' NGROK_DOMAIN='${NGROK_DOMAIN:-}' CLOUD_REGISTER_EMAIL_REMOTE='${CLOUD_REGISTER_EMAIL_REMOTE:-}' EMAIL_REGISTER_ROOT='$DEST' bash '$DEST/deploy/remote_install.sh' '$NODE'"
 
-echo "==> enable supervisor (no ngrok on workers)"
+echo "==> enable supervisor / daemon"
 ssh -i "$KEY" -p "$PORT" -o StrictHostKeyChecking=no "${USER}@${HOST}" \
-  "OUTLOOK_REGISTRAR_NODE='$NODE' USE_NGROK_HUB=0 bash '$DEST/deploy/remote_enable_supervisor.sh'" 2>/dev/null || \
+  "OUTLOOK_REGISTRAR_NODE='$NODE' USE_NGROK_HUB='${USE_NGROK_HUB:-1}' NGROK_AUTHTOKEN='${NGROK_AUTHTOKEN:-}' NGROK_DOMAIN='${NGROK_DOMAIN:-}' CLOUD_REGISTER_EMAIL_REMOTE='${CLOUD_REGISTER_EMAIL_REMOTE:-}' EMAIL_REGISTER_ROOT='$DEST' bash '$DEST/deploy/remote_enable_supervisor.sh'" 2>/dev/null || \
   ssh -i "$KEY" -p "$PORT" -o StrictHostKeyChecking=no "${USER}@${HOST}" \
-  "sudo OUTLOOK_REGISTRAR_NODE='$NODE' EMAIL_REGISTER_ROOT='$DEST' bash '$DEST/deploy/remote_install_gcore.sh'" 2>/dev/null || true
+  "sudo OUTLOOK_REGISTRAR_NODE='$NODE' USE_NGROK_HUB='${USE_NGROK_HUB:-1}' NGROK_AUTHTOKEN='${NGROK_AUTHTOKEN:-}' NGROK_DOMAIN='${NGROK_DOMAIN:-}' CLOUD_REGISTER_EMAIL_REMOTE='${CLOUD_REGISTER_EMAIL_REMOTE:-}' EMAIL_REGISTER_ROOT='$DEST' bash '$DEST/deploy/remote_install_gcore.sh' '$NODE'" 2>/dev/null || true
 
 echo "OK $NODE"

@@ -210,7 +210,7 @@ BROWSER_DOWNLOAD_INFO = {
     "lalicat": {"name": "Lalicat", "url": "https://www.lalicat.com/"},
 }
 
-CDP_CHECK_TIMEOUT = 45  # seconds to wait for CDP to be ready (increased from 30 for stability)
+CDP_CHECK_TIMEOUT = 60  # seconds to wait for CDP to be ready (increased from 45 for low-resource containers)
 CDP_CHECK_INTERVAL = 0.3
 _LAUNCH_LOCK = threading.Lock()  # 并发启动Chrome时串行化，避免资源竞争导致崩溃
 
@@ -400,29 +400,35 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def _wait_for_cdp(port: int, timeout: float = CDP_CHECK_TIMEOUT) -> dict:
-    """Wait for Chrome CDP to be ready and return the WebSocket debug URL."""
+def _wait_for_cdp(port: int, timeout: float = CDP_CHECK_TIMEOUT, process: Any = None) -> dict:
+    """Wait for Chrome CDP to be ready and return the WebSocket debug URL.
+    If process is provided, checks if Chrome has crashed during startup."""
     deadline = time.monotonic() + timeout
     url = f"http://127.0.0.1:{port}/json/version"
+    last_err = None
     while time.monotonic() < deadline:
+        # Check if Chrome process crashed
+        if process and process.poll() is not None:
+            raise RuntimeError(f"Chrome exited during startup with code {process.returncode}")
         try:
             req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=2) as resp:
+            with urllib.request.urlopen(req, timeout=3) as resp:
                 data = json.loads(resp.read())
                 ws_url = data.get("webSocketDebuggerUrl", "")
                 if ws_url:
                     logger.info("[CDP] Chrome ready, ws=%s", ws_url[:80])
                     return data
-        except Exception:
-            pass
+        except Exception as e:
+            last_err = str(e)
         time.sleep(CDP_CHECK_INTERVAL)
-    raise TimeoutError(f"Chrome CDP not ready after {timeout}s on port {port}")
+    raise TimeoutError(f"Chrome CDP not ready after {timeout}s on port {port}: {last_err}")
 
 
 def _get_page_ws_url(port: int) -> str:
     """Get the WebSocket URL for the first page tab (带重试，并发启动时需要更长时间）。"""
     url = f"http://127.0.0.1:{port}/json"
-    for attempt in range(6):  # 最多重试6次
+    last_err = None
+    for attempt in range(8):  # 增加重试次数: 6→8
         try:
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=8) as resp:
@@ -430,12 +436,13 @@ def _get_page_ws_url(port: int) -> str:
                 for tab in tabs:
                     if tab.get("type") == "page":
                         return tab["webSocketDebuggerUrl"]
+                # Got a response but no page tab yet - wait and retry
+                last_err = "no page tab found"
         except Exception as e:
-            if attempt < 5:
-                time.sleep(1)
-                continue
-            logger.warning("[CDP] Failed to get page WS URL: %s", e)
-        logger.warning("[CDP] Failed to get page WS URL: %s", e)
+            last_err = str(e)
+        if attempt < 7:
+            time.sleep(1 + attempt * 0.5)  # 递增等待: 1, 1.5, 2, 2.5, ...
+    logger.warning("[CDP] Failed to get page WS URL after %d attempts: %s", 8, last_err)
     return ""
 
 
@@ -595,7 +602,7 @@ class CDPBrowser:
         chrome_err_file = None
         for _launch_attempt in range(MAX_LAUNCH_RETRIES):
             with _LAUNCH_LOCK:
-                err_dir = Path("/home/workspace/Email-Register/runtime_outlook/logs")
+                err_dir = Path(__file__).resolve().parents[1] / "runtime_outlook" / "logs"
                 err_dir.mkdir(parents=True, exist_ok=True)
                 chrome_err_path = err_dir / f"chrome_{self._port}_{_launch_attempt + 1}.err"
                 chrome_err_file = open(chrome_err_path, "w", encoding="utf-8")
@@ -652,8 +659,8 @@ class CDPBrowser:
             else:
                 break  # Chrome launched successfully
 
-        # Wait for CDP to be ready
-        _wait_for_cdp(self._port)
+        # Wait for CDP to be ready (pass process for crash detection)
+        _wait_for_cdp(self._port, process=self._process)
 
         # Connect WebSocket
         self._connect_ws()
@@ -666,8 +673,20 @@ class CDPBrowser:
         except Exception:
             pass
 
-        # Enable necessary CDP domains
-        self._send_cmd("Runtime.enable")
+        # Enable necessary CDP domains with retry for reliability
+        for _cdp_enable_attempt in range(3):
+            try:
+                self._send_cmd("Runtime.enable", timeout=60)
+                break
+            except (TimeoutError, RuntimeError) as e:
+                if _cdp_enable_attempt < 2:
+                    logger.warning("[CDP] Runtime.enable failed (attempt %d/3): %s, retrying...", _cdp_enable_attempt + 1, e)
+                    # Check if Chrome is still alive
+                    if self._process and self._process.poll() is not None:
+                        raise RuntimeError(f"Chrome crashed during CDP setup (exit code {self._process.returncode})")
+                    time.sleep(2)
+                else:
+                    raise
         self._send_cmd("DOM.enable")
         self._send_cmd("Page.enable")
         
@@ -814,11 +833,20 @@ class CDPBrowser:
         # 标记连接已断开
         self._connected = False
 
-    def _send_cmd(self, method: str, params: dict | None = None, timeout: float = 30) -> dict:
-        """Send a CDP command and wait for response. Auto-reconnects if WebSocket is closed."""
+    def _send_cmd(self, method: str, params: dict | None = None, timeout: float = 60) -> dict:
+        """Send a CDP command and wait for response. Auto-reconnects if WebSocket is closed.
+        Default timeout increased from 30s to 60s for low-resource containers."""
         import websocket as _ws_mod
 
+        # Pre-check: if Chrome process has exited, don't even try
+        if self._process and self._process.poll() is not None:
+            raise RuntimeError(f"CDP send failed: Chrome process already exited with code {self._process.returncode}")
+
         for attempt in range(2):
+            # Pre-check: fail fast if Chrome process has crashed
+            if self._process and self._process.poll() is not None:
+                raise RuntimeError(f"Chrome process crashed (exit code {self._process.returncode}) before CDP command: {method}")
+            
             self._msg_id += 1
             msg_id = self._msg_id
             msg = {"id": msg_id, "method": method}

@@ -259,6 +259,8 @@ th{color:var(--muted);font-weight:500}
 const clock=document.getElementById('clock');
 setInterval(()=>{clock.textContent=new Date().toLocaleString('zh-CN')},1000);
 
+const BASE_PATH = window.location.pathname.startsWith('/api/outlook') ? '/api/outlook' : '';
+
 async function go(action){
   const btn=document.querySelector(`button[onclick="go('${action}')"]`);
   if(btn){btn.disabled=true;btn.textContent='⏳ 执行中...';}
@@ -266,7 +268,7 @@ async function go(action){
   logEl.style.display='block';
   logEl.textContent='正在执行 '+action+' ...';
   try{
-    const r=await fetch('/api/action/'+action,{method:'POST'});
+    const r=await fetch(BASE_PATH+'/api/action/'+action,{method:'POST'});
     const d=await r.json();
     if(d.ok){
       showToast('✅ '+d.msg,'ok');

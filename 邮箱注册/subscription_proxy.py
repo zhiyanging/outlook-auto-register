@@ -28,6 +28,121 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_subscription_text(text: str) -> dict:
+    """解析纯文本订阅内容（base64 编码的节点列表），提取节点信息。
+
+    支持格式:
+    - vless://...
+    - ss://...
+    - trojan://...
+    - hysteria2://...
+
+    返回 mihomo 格式的 proxies 列表。
+    """
+    import base64
+    import urllib.parse
+
+    proxies = []
+    seen = set()
+
+    # 可能是 base64 编码的
+    lines = text.splitlines()
+    # 如果内容只有一行且很长，可能是 base64
+    if len(lines) == 1 and len(text) > 200 and not text.startswith(("vless", "ss://", "trojan", "hysteria")):
+        try:
+            text = base64.b64decode(text).decode("utf-8", errors="replace")
+            lines = text.splitlines()
+        except Exception:
+            pass
+
+    idx = 0
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            if line.startswith("vless://"):
+                # vless://uuid@host:port?params#name
+                parsed = urllib.parse.urlparse(line)
+                host = parsed.hostname or ""
+                port = parsed.port or 443
+                name = urllib.parse.unquote(parsed.fragment) if parsed.fragment else f"vless-{idx}"
+                if name not in seen:
+                    seen.add(name)
+                    proxies.append({
+                        "name": name,
+                        "type": "vless",
+                        "server": host,
+                        "port": port,
+                        "uuid": parsed.username or "",
+                    })
+            elif line.startswith("ss://"):
+                # ss://base64(user:pass)@host:port#name
+                parsed = urllib.parse.urlparse(line)
+                host = parsed.hostname or ""
+                port = parsed.port or 443
+                name = urllib.parse.unquote(parsed.fragment) if parsed.fragment else f"ss-{idx}"
+                if name not in seen:
+                    seen.add(name)
+                    proxies.append({
+                        "name": name,
+                        "type": "ss",
+                        "server": host,
+                        "port": port,
+                    })
+            elif line.startswith("trojan://"):
+                parsed = urllib.parse.urlparse(line)
+                host = parsed.hostname or ""
+                port = parsed.port or 443
+                name = urllib.parse.unquote(parsed.fragment) if parsed.fragment else f"trojan-{idx}"
+                if name not in seen:
+                    seen.add(name)
+                    proxies.append({
+                        "name": name,
+                        "type": "trojan",
+                        "server": host,
+                        "port": port,
+                        "password": parsed.username or "",
+                    })
+            elif line.startswith("hysteria2://"):
+                parsed = urllib.parse.urlparse(line)
+                host = parsed.hostname or ""
+                port = parsed.port or 443
+                name = urllib.parse.unquote(parsed.fragment) if parsed.fragment else f"hysteria2-{idx}"
+                if name not in seen:
+                    seen.add(name)
+                    proxies.append({
+                        "name": name,
+                        "type": "hysteria2",
+                        "server": host,
+                        "port": port,
+                    })
+            elif line.startswith("vmess://"):
+                # vmess://base64(json)
+                payload = line[len("vmess://"):]
+                try:
+                    info = json.loads(base64.b64decode(payload))
+                    name = info.get("ps", f"vmess-{idx}")
+                    host = info.get("add", "")
+                    port = int(info.get("port", 443))
+                    if name not in seen:
+                        seen.add(name)
+                        proxies.append({
+                            "name": name,
+                            "type": "vmess",
+                            "server": host,
+                            "port": port,
+                        })
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"解析节点失败: {line[:40]}... {e}")
+        idx += 1
+
+    return {"proxies": proxies}
+
+
 # ─── 常量 ───
 MIHOMO_DIR = Path(__file__).parent / "mihomo_runtime"
 MIHOMO_EXE = MIHOMO_DIR / "mihomo.exe"
@@ -224,17 +339,69 @@ class SubscriptionProxyManager:
             seen_names = set()
             for i, sub in enumerate(self._subscriptions):
                 try:
-                    resp = requests.get(sub["url"], timeout=15, headers={
+                    url = sub["url"]
+                    # vostuo 订阅需要 ?clash=1 参数才能获取节点列表
+                    if "vostuo.com" in url and "clash" not in url:
+                        url = url + ("&" if "?" in url else "?") + "clash=1"
+                    resp = requests.get(url, timeout=15, headers={
                         "User-Agent": "ClashForAndroid/2.5.12"
                     }, proxies={"http": None, "https": None})
                     resp.raise_for_status()
-                    data = yaml.safe_load(resp.text)
-                    if isinstance(data, dict) and "proxies" in data:
+                    text = resp.text.strip()
+                    data = None
+                    # 尝试 YAML 解析（Clash/V2Ray 等标准格式）
+                    try:
+                        data = yaml.safe_load(text)
+                    except Exception:
+                        pass
+                    # 如果不是有效 YAML dict，或 proxies 为空/缺失，尝试 base64 解码（vostuo 等纯文本格式）
+                    need_b64 = False
+                    if not isinstance(data, dict):
+                        need_b64 = True
+                    elif not data.get("proxies"):
+                        need_b64 = True
+                    if need_b64:
+                        import base64
+                        try:
+                            decoded = base64.b64decode(text).decode("utf-8", errors="replace")
+                            data = _parse_subscription_text(decoded)
+                        except Exception:
+                            pass
+                    if isinstance(data, dict) and data.get("proxies"):
                         for p in data["proxies"]:
                             name = p.get("name", "")
                             if name and name not in seen_names:
                                 seen_names.add(name)
                                 all_proxies.append(p)
+                    # 如果 proxies 为空，尝试从 proxy-providers 获取节点
+                    if not all_proxies and isinstance(data, dict):
+                        providers = data.get("proxy-providers") or data.get("proxy-providers-cache") or {}
+                        if isinstance(providers, dict) and providers:
+                            logger.info(f"[mihomo] 发现 {len(providers)} 个 proxy-providers，尝试获取节点...")
+                            for pname, pconf in providers.items():
+                                try:
+                                    purl = pconf.get("url", "") if isinstance(pconf, dict) else ""
+                                    if not purl:
+                                        continue
+                                    presp = requests.get(purl, timeout=15, headers={
+                                        "User-Agent": "ClashForAndroid/2.5.12"
+                                    }, proxies={"http": None, "https": None})
+                                    presp.raise_for_status()
+                                    ptext = presp.text.strip()
+                                    pdata = None
+                                    try:
+                                        pdata = yaml.safe_load(ptext)
+                                    except Exception:
+                                        pass
+                                    if isinstance(pdata, dict) and pdata.get("proxies"):
+                                        for p in pdata["proxies"]:
+                                            name = p.get("name", "")
+                                            if name and name not in seen_names:
+                                                seen_names.add(name)
+                                                all_proxies.append(p)
+                                                logger.info(f"[mihomo] provider {pname}: +{len(pdata['proxies'])} 节点")
+                                except Exception as pe:
+                                    logger.warning(f"[mihomo] provider {pname} 获取失败: {pe}")
                 except Exception as e:
                     logger.warning(f"[mihomo] 订阅 {i} 下载失败: {e}")
 
