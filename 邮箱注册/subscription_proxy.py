@@ -342,6 +342,9 @@ class SubscriptionProxyManager:
                 try:
                     url = sub["url"]
                     # vostuo 订阅需要 ?clash=1 参数才能获取节点列表
+                    # 飞鸟云等面板需要 &flag=meta 才能获取全部节点
+                    if "453521.xyz" in url and "flag=" not in url:
+                        url = url + ("&" if "?" in url else "?") + "flag=meta"
                     if "vostuo.com" in url and "clash" not in url:
                         url = url + ("&" if "?" in url else "?") + "clash=1"
                     resp = requests.get(url, timeout=15, headers={
