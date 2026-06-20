@@ -77,19 +77,34 @@ def proxy_status() -> dict:
             seen.add(n)
             unique.append(n)
 
+    # Add node count to each subscription
+    subs = _load_subs()
+    # Get all proxy details to check provider
+    all_proxies = proxies_data.get("proxies", {})
+    for sub in subs:
+        # Count nodes from this subscription's provider
+        provider_name = sub.get("name", "")
+        count = 0
+        for node_name in unique:
+            proxy_info = all_proxies.get(node_name, {})
+            # Check if this node belongs to this subscription
+            # (simplified: count all nodes, as mihomo doesn't expose provider mapping directly)
+            pass
+        sub["node_count"] = len(unique)  # Total nodes for now
+
     return {
         "running": True,
         "version": version.get("version", "") if version else "",
         "nodes": len(unique),
         "current": auto.get("now", ""),
         "mode": proxies_data.get("mode", auto.get("type", "")),
-        "subscriptions": _load_subs(),
+        "subscriptions": subs,
         "residential": _load_residential(),
     }
 
 
 def proxy_nodes() -> list[dict]:
-    """获取所有节点详情（含延迟）"""
+    """获取所有节点详情（含延迟），按延迟排序"""
     data = _mihomo_get("/proxies")
     if not data:
         return []
@@ -100,6 +115,7 @@ def proxy_nodes() -> list[dict]:
     seen = set()
     result = []
     skip = {"COMPATIBLE", "DIRECT", "PASS", "PASS-RULE", "REJECT", "REJECT-DROP", "AUTO"}
+    
     for name in all_names:
         if name in seen or name in skip:
             continue
@@ -107,13 +123,29 @@ def proxy_nodes() -> list[dict]:
         info = proxies.get(name, {})
         history = info.get("history", [])
         delay = history[-1].get("delay", 0) if history else 0
+        alive = info.get("alive", False)
+        
+        # Extract server/port if available in proxy config
+        server = info.get("server", "")
+        port = info.get("port", 0)
+        
         result.append({
             "name": name,
             "type": info.get("type", ""),
             "delay": delay,
-            "alive": info.get("alive", False),
+            "alive": alive,
             "current": name == current,
+            "server": server,
+            "port": port,
         })
+    
+    # Sort: alive nodes with lowest delay first, then dead nodes
+    result.sort(key=lambda x: (
+        0 if x["alive"] else 1,  # alive first
+        x["delay"] if x["alive"] and x["delay"] > 0 else 99999,  # by delay
+        x["name"]  # by name as tiebreaker
+    ))
+    
     return result
 
 
@@ -155,13 +187,133 @@ def proxy_test_all() -> dict:
     time.sleep(3)
     nodes = proxy_nodes()
     alive = [n for n in nodes if n.get("alive") and n.get("delay", 0) > 0]
-    alive.sort(key=lambda x: x.get("delay", 99999))
     return {
         "ok": True,
         "tested": len(nodes),
         "alive": len(alive),
         "nodes": nodes,
     }
+
+
+def proxy_delete_node(node_name: str) -> dict:
+    """从 mihomo 配置中删除节点"""
+    config_path = MIHOMO_DIR / "config.yaml"
+    if not config_path.exists():
+        return {"ok": False, "msg": "配置文件不存在"}
+    
+    try:
+        import yaml
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+        
+        # Check if node is WARP (preserve it)
+        if "WARP" in node_name.upper():
+            return {"ok": False, "msg": "WARP 节点不允许删除"}
+        
+        # Remove from proxies list
+        proxies = config.get("proxies", [])
+        config["proxies"] = [p for p in proxies if p.get("name") != node_name]
+        
+        # Remove from proxy groups
+        for group in config.get("proxy-groups", []):
+            if "proxies" in group:
+                group["proxies"] = [p for p in group["proxies"] if p != node_name]
+        
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+        
+        # Reload mihomo config
+        _mihomo_put("/configs", {"path": str(config_path)})
+        
+        return {"ok": True, "msg": f"已删除节点: {node_name}"}
+    except Exception as e:
+        return {"ok": False, "msg": f"删除失败: {str(e)}"}
+
+
+def proxy_rename_node(old_name: str, new_name: str) -> dict:
+    """重命名节点"""
+    if not new_name or new_name == old_name:
+        return {"ok": False, "msg": "新名称无效"}
+    
+    config_path = MIHOMO_DIR / "config.yaml"
+    if not config_path.exists():
+        return {"ok": False, "msg": "配置文件不存在"}
+    
+    try:
+        import yaml
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+        
+        # Rename in proxies list
+        for proxy in config.get("proxies", []):
+            if proxy.get("name") == old_name:
+                proxy["name"] = new_name
+                break
+        
+        # Rename in proxy groups
+        for group in config.get("proxy-groups", []):
+            if "proxies" in group:
+                group["proxies"] = [new_name if p == old_name else p for p in group["proxies"]]
+        
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+        
+        # Reload mihomo config
+        _mihomo_put("/configs", {"path": str(config_path)})
+        
+        return {"ok": True, "msg": f"已重命名: {old_name} → {new_name}"}
+    except Exception as e:
+        return {"ok": False, "msg": f"重命名失败: {str(e)}"}
+
+
+def proxy_get_exit_ip() -> dict:
+    """获取当前出口 IP"""
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(("127.0.0.1", MIHOMO_PROXY_PORT))
+        s.close()
+        
+        proxy_url = f"http://127.0.0.1:{MIHOMO_PROXY_PORT}"
+        os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+        
+        req = urllib.request.Request("https://ipinfo.io/json")
+        proxy_handler = urllib.request.ProxyHandler({"https": proxy_url, "http": proxy_url})
+        opener = urllib.request.build_opener(proxy_handler)
+        
+        with opener.open(req, timeout=10) as r:
+            d = json.loads(r.read())
+        
+        return {
+            "ok": True,
+            "ip": d.get("ip", ""),
+            "country": d.get("country", ""),
+            "region": d.get("region", ""),
+            "city": d.get("city", ""),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
+def proxy_auto_rotate() -> dict:
+    """自动切换到延迟最低的存活节点"""
+    nodes = proxy_nodes()
+    alive_nodes = [n for n in nodes if n.get("alive") and n.get("delay", 0) > 0]
+    
+    if not alive_nodes:
+        return {"ok": False, "msg": "没有可用的存活节点"}
+    
+    # Pick the one with lowest delay
+    best = min(alive_nodes, key=lambda x: x["delay"])
+    
+    if _mihomo_put("/proxies/AUTO", {"name": best["name"]}):
+        return {
+            "ok": True,
+            "msg": f"已切换到最优节点: {best['name']} ({best['delay']}ms)",
+            "node": best
+        }
+    return {"ok": False, "msg": "切换失败"}
 
 
 def _load_subs() -> list[dict]:
@@ -207,7 +359,7 @@ def proxy_remove_subscription(url: str) -> dict:
 def proxy_refresh_subscriptions() -> dict:
     """刷新订阅：重新拉取所有订阅并重启 mihomo"""
     save_status({"phase": "proxy_refresh", "phase_message": "正在刷新订阅代理..."})
-    code, out, err = _run(["bash", str(ROOT / "deploy" / "ensure_mihomo_proxy.sh")], timeout=90)
+    code, out, err = _run(["bash", str(ROOT / "deploy" / "ensure_mihomo_proxy.sh")], timeout=120)
     ok = code == 0 and "PROXY_OK" in out
     ip = ""
     for line in out.splitlines():
@@ -218,6 +370,26 @@ def proxy_refresh_subscriptions() -> dict:
     msg = f"订阅刷新{'成功' if ok else '失败'}"
     if ip:
         msg += f" → 出口 {ip}"
+    
+    # Update node count per subscription
+    if ok:
+        time.sleep(3)  # Wait for mihomo to start
+        subs = _load_subs()
+        proxies_data = _mihomo_get("/proxies")
+        if proxies_data:
+            auto = proxies_data.get("proxies", {}).get("AUTO", {})
+            all_nodes = auto.get("all", [])
+            # Get all proxy details
+            all_proxies = proxies_data.get("proxies", {})
+            
+            # Try to count nodes per subscription by checking provider info
+            for sub in subs:
+                # Count nodes that might belong to this subscription
+                # (This is a best-effort approach since mihomo doesn't expose provider mapping directly)
+                sub["node_count"] = len([n for n in all_nodes if n not in ("COMPATIBLE", "DIRECT", "PASS", "REJECT", "AUTO")])
+            
+            _save_subs(subs)
+    
     save_status({"phase": "idle", "phase_message": msg})
     return {"ok": ok, "msg": msg, "output": out[-800:]}
 
@@ -510,6 +682,8 @@ th{color:var(--muted);font-weight:500}
   <div id="tab-proxy-nodes" class="tab-content">
     <div class="btn-row">
       <button class="btn sm" onclick="testAllNodes()">⚡ 全部测速</button>
+      <button class="btn sm ok" onclick="autoRotate()">🎯 自动选择</button>
+      <button class="btn sm" onclick="verifyExitIP()">🔍 验证出口</button>
       <button class="btn sm" onclick="loadNodes()">🔄 刷新列表</button>
       <span id="node-summary" style="font-size:.8rem;color:var(--muted);line-height:2"></span>
     </div>
@@ -690,20 +864,36 @@ function renderNodeList(nodes) {
     $('node-list').innerHTML = '<div style="padding:1rem;text-align:center;color:var(--muted)">暂无节点</div>';
     return;
   }
-  $('node-list').innerHTML = nodes.map(n => {
+  
+  // Sort: alive first, then by delay
+  const sorted = [...nodes].sort((a, b) => {
+    if (a.alive !== b.alive) return a.alive ? -1 : 1;
+    if (a.delay === 0 && b.delay === 0) return a.name.localeCompare(b.name);
+    if (a.delay === 0) return 1;
+    if (b.delay === 0) return -1;
+    return a.delay - b.delay;
+  });
+  
+  $('node-list').innerHTML = sorted.map(n => {
     const delay = n.delay || 0;
     let delayClass = 'delay-none', delayText = '—';
     if (delay > 0) {
       delayText = delay + 'ms';
       delayClass = delay < 200 ? 'delay-good' : delay < 500 ? 'delay-med' : 'delay-bad';
     }
-    return `<div class="node-item ${n.current?'current':''}" onclick="switchNode('${n.name.replace(/'/g,"\\'")}')">
-      <span class="alive-dot ${n.alive?'on':'off'}"></span>
-      <span class="node-name" title="${n.name}">${n.name}</span>
+    const isWarp = n.name.toUpperCase().includes('WARP');
+    const deleteBtn = isWarp ? '' : `<button class="btn sm err" onclick="deleteNode('${n.name.replace(/'/g,"\\\\'")}')">🗑</button>`;
+    return `<div class="node-item ${n.current?'current':''}">
+      <span class="alive-dot ${n.alive?'on':'off'}" onclick="switchNode('${n.name.replace(/'/g,"\\\\'")}')" style="cursor:pointer"></span>
+      <span class="node-name" onclick="switchNode('${n.name.replace(/'/g,"\\\\'")}')" style="cursor:pointer" title="${n.name}">${n.name}</span>
       <span class="node-meta">
         <span style="color:var(--muted)">${n.type}</span>
         <span class="node-delay ${delayClass}">${delayText}</span>
         ${n.current ? '<span style="color:var(--accent)">◆ 当前</span>' : ''}
+      </span>
+      <span class="node-actions">
+        <button class="btn sm" onclick="renameNode('${n.name.replace(/'/g,"\\\\'")}')">✏️</button>
+        ${deleteBtn}
       </span>
     </div>`;
   }).join('');
@@ -714,6 +904,48 @@ async function switchNode(name) {
     const d = await api('/api/proxy/nodes/' + encodeURIComponent(name), 'PUT');
     toast(d.ok ? '✅ ' + d.msg : '❌ ' + d.msg, d.ok ? 'ok' : 'err');
     setTimeout(loadNodes, 500);
+  } catch(e) { toast('❌ ' + e, 'err'); }
+}
+
+async function deleteNode(name) {
+  if (!confirm(`确定删除节点 "${name}"？`)) return;
+  try {
+    const d = await api('/api/proxy/delete-node', 'POST', {node_name: name});
+    toast(d.ok ? '✅ ' + d.msg : '❌ ' + d.msg, d.ok ? 'ok' : 'err');
+    if (d.ok) setTimeout(loadNodes, 500);
+  } catch(e) { toast('❌ ' + e, 'err'); }
+}
+
+async function renameNode(oldName) {
+  const newName = prompt(`重命名节点:\n当前: ${oldName}\n新名称:`, oldName);
+  if (!newName || newName === oldName) return;
+  try {
+    const d = await api('/api/proxy/rename-node', 'PUT', {old_name: oldName, new_name: newName});
+    toast(d.ok ? '✅ ' + d.msg : '❌ ' + d.msg, d.ok ? 'ok' : 'err');
+    if (d.ok) setTimeout(loadNodes, 500);
+  } catch(e) { toast('❌ ' + e, 'err'); }
+}
+
+async function verifyExitIP() {
+  toast('⏳ 检测出口 IP...');
+  try {
+    const d = await api('/api/proxy/exit-ip', 'POST');
+    if (d.ok) {
+      $('p-ip').textContent = d.ip + ' (' + (d.country||'') + ')';
+      toast('✅ 出口: ' + d.ip, 'ok');
+    } else {
+      $('p-ip').textContent = '❌ ' + (d.error||'失败');
+      toast('❌ ' + (d.error||'检测失败'), 'err');
+    }
+  } catch(e) { toast('❌ ' + e, 'err'); }
+}
+
+async function autoRotate() {
+  toast('⏳ 自动选择最佳节点...');
+  try {
+    const d = await api('/api/proxy/auto-rotate', 'POST');
+    toast(d.ok ? '✅ ' + d.msg : '❌ ' + d.msg, d.ok ? 'ok' : 'err');
+    if (d.ok) setTimeout(loadNodes, 1000);
   } catch(e) { toast('❌ ' + e, 'err'); }
 }
 
@@ -737,13 +969,32 @@ async function loadSubs() {
 function renderSubList(subs) {
   const el = $('sub-list');
   if (!subs.length) { el.innerHTML = '<p style="color:var(--muted);font-size:.82rem">暂无订阅</p>'; return; }
-  el.innerHTML = '<table><tr><th>名称</th><th>链接</th><th>添加时间</th><th></th></tr>' +
-    subs.map(s => `<tr>
+  el.innerHTML = '<table><tr><th>名称</th><th>链接</th><th>节点数</th><th>添加时间</th><th></th></tr>' +
+    subs.map(s => {
+      // Mask URL: show domain + *** + last 8 chars
+      const url = s.url || '';
+      let maskedUrl = url;
+      try {
+        const u = new URL(url);
+        const domain = u.hostname;
+        const last8 = url.slice(-8);
+        maskedUrl = domain + '/***' + last8;
+      } catch(e) {
+        if (url.length > 20) {
+          maskedUrl = url.substring(0, 15) + '***' + url.slice(-8);
+        }
+      }
+      return `<tr>
       <td>${s.name||'—'}</td>
-      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${s.url}">${s.url}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${url}">${maskedUrl}</td>
+      <td>${s.node_count||'—'}</td>
       <td>${s.added||'—'}</td>
-      <td><button class="btn sm err" onclick="removeSub('${encodeURIComponent(s.url)}')">🗑</button></td>
-    </tr>`).join('') + '</table>';
+      <td>
+        <button class="btn sm" onclick="renameSub('${encodeURIComponent(url)}','${s.name||''}')">✏️</button>
+        <button class="btn sm err" onclick="removeSub('${encodeURIComponent(url)}')">🗑</button>
+      </td>
+    </tr>`;
+    }).join('') + '</table>';
 }
 
 async function addSub() {
@@ -760,6 +1011,16 @@ async function addSub() {
 async function removeSub(url) {
   try {
     const d = await api('/api/proxy/subscriptions?url=' + url, 'DELETE');
+    toast(d.ok ? '✅ ' + d.msg : '❌ ' + d.msg, d.ok ? 'ok' : 'err');
+    if (d.ok) loadSubs();
+  } catch(e) { toast('❌ ' + e, 'err'); }
+}
+
+async function renameSub(url, oldName) {
+  const newName = prompt(`重命名订阅:\n当前: ${oldName || '(未命名)'}\n新名称:`, oldName);
+  if (!newName || newName === oldName) return;
+  try {
+    const d = await api('/api/proxy/rename-subscription', 'PUT', {url: decodeURIComponent(url), new_name: newName});
     toast(d.ok ? '✅ ' + d.msg : '❌ ' + d.msg, d.ok ? 'ok' : 'err');
     if (d.ok) loadSubs();
   } catch(e) { toast('❌ ' + e, 'err'); }
@@ -1045,6 +1306,19 @@ class Handler(BaseHTTPRequestHandler):
             self._json(residential_deactivate())
             return
 
+        if path == "/api/proxy/delete-node":
+            node_name = body.get("node_name", "")
+            self._json(proxy_delete_node(node_name))
+            return
+
+        if path == "/api/proxy/exit-ip":
+            self._json(proxy_get_exit_ip())
+            return
+
+        if path == "/api/proxy/auto-rotate":
+            self._json(proxy_auto_rotate())
+            return
+
         self.send_error(404)
 
     def do_PUT(self):
@@ -1055,6 +1329,12 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/proxy/nodes/"):
             node_name = urllib.parse.unquote(path.rsplit("/", 1)[-1])
             self._json(proxy_switch_node(node_name))
+            return
+
+        if path == "/api/proxy/rename-node":
+            old_name = body.get("old_name", "")
+            new_name = body.get("new_name", "")
+            self._json(proxy_rename_node(old_name, new_name))
             return
 
         self.send_error(404)
