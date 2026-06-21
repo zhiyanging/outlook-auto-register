@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,8 @@ SCHEDULE_PATH = ROOT / "runtime_outlook" / "daemon_schedule.json"
 LOG_FILE = ROOT / "runtime_outlook" / "logs" / "outlook_daemon.log"
 RESULTS_FILE = ROOT / "runtime_outlook" / "results.jsonl"
 DEPLOY_TS = 1780774138  # 2026-06-06T19:28:58 UTC, when the daemon service was first deployed
+
+ZO_USER = os.environ.get("ZO_USER", "") or os.environ.get("ZO_HOST_KEY", "") or "user"
 
 REGISTER_INTERVAL_SECONDS = 4 * 60 * 60
 REGISTER_COUNT = 5
@@ -152,21 +155,42 @@ def _registration_stats() -> dict[str, Any]:
             ts_str = (record.get("ts") or "")[:10]
             if ts_str == today_str:
                 today_registrations += 1
-    elapsed = time.time() - DEPLOY_TS
-    days = int(elapsed // 86400)
-    hours = int((elapsed % 86400) // 3600)
-    mins = int((elapsed % 3600) // 60)
-    if days > 0:
-        runtime_str = f"{days}天{hours}小时{mins}分"
-    elif hours > 0:
-        runtime_str = f"{hours}小时{mins}分"
-    else:
-        runtime_str = f"{mins}分钟"
+
+    # 部署至今时长
+    deploy_elapsed = time.time() - DEPLOY_TS
+    deploy_str = _fmt_duration(deploy_elapsed)
+
+    # 守护进程实际运行时长（从 PID 文件创建时间算起）
+    daemon_uptime_str = "未运行"
+    pid_path = ROOT / "runtime_outlook" / "current.pid"
+    if pid_path.is_file():
+        try:
+            pid_mtime = pid_path.stat().st_mtime
+            daemon_elapsed = time.time() - pid_mtime
+            daemon_uptime_str = _fmt_duration(daemon_elapsed)
+        except OSError:
+            pass
+
     return {
         "total_registrations": total_registrations,
         "today_registrations": today_registrations,
-        "total_runtime": runtime_str,
+        "total_runtime": daemon_uptime_str,
+        "deploy_elapsed": deploy_str,
+        "zo_user": ZO_USER,
     }
+
+
+def _fmt_duration(seconds: float) -> str:
+    """将秒数格式化为 X天X小时X分 的友好字符串"""
+    days = int(seconds // 86400)
+    hours = int((seconds % 86400) // 3600)
+    mins = int((seconds % 3600) // 60)
+    if days > 0:
+        return f"{days}天{hours}小时{mins}分"
+    elif hours > 0:
+        return f"{hours}小时{mins}分"
+    else:
+        return f"{mins}分钟"
 
 
 def build_snapshot(extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -181,8 +205,8 @@ def build_snapshot(extra: dict[str, Any] | None = None) -> dict[str, Any]:
         except (OSError, json.JSONDecodeError):
             pass
     snap: dict[str, Any] = {
-        "node_id": node_meta.get("node_id", "xzxyuan"),
-        "node_label": node_meta.get("label", node_meta.get("node_id", "xzxyuan")),
+        "node_id": node_meta.get("node_id", ZO_USER),
+        "node_label": node_meta.get("label", node_meta.get("node_id", ZO_USER)),
         "service": "outlook-auto-register-daemon",
         "interval_hours": 4,
         "batch_size": REGISTER_COUNT,

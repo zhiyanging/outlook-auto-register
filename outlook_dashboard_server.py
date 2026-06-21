@@ -584,7 +584,7 @@ HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Outlook 自动注册 · xzxyuan</title>
+<title>Outlook 自动注册 · {{node_label}}</title>
 <style>
 :root{--bg:#0f1419;--card:#1a2332;--text:#e7ecf3;--muted:#8b9cb3;--ok:#3dd68c;--bad:#f07178;--accent:#6cb6ff;--btn:#2563eb;--btn-hover:#1d4ed8;--border:#2a3548}
 *{box-sizing:border-box}
@@ -705,7 +705,7 @@ th{color:var(--muted);font-weight:500}
 </head>
 <body>
 <h1>📬 Outlook 自动注册</h1>
-<p class="sub">xzxyuan · 每 4 小时 5 个 · <span id="clock"></span></p>
+<p class="sub">{{node_label}} · 每 4 小时 5 个 · <span id="clock"></span></p>
 
 <!-- 统计卡片 -->
 <div class="grid">
@@ -722,7 +722,8 @@ th{color:var(--muted);font-weight:500}
   </div>
 </div></div>
       <div><div class="stat-big" style="color:var(--accent)">{{today_registrations}}</div><div class="stat-label">今日注册</div></div>
-      <div><div class="stat-big" style="color:#c4b5fd">{{total_runtime}}</div><div class="stat-label">运行总时长</div></div>
+      <div><div class="stat-big" style="color:#c4b5fd">{{total_runtime}}</div><div class="stat-label">运行时长</div></div>
+      <div><div class="stat-big" style="color:#fbbf24">{{deploy_elapsed}}</div><div class="stat-label">部署至今</div></div>
     </div>
   </div>
   <div class="card">
@@ -1331,6 +1332,8 @@ def _render_page(snap: dict) -> str:
         .replace("{{total_registrations}}", str(snap.get("total_registrations", 0)))
         .replace("{{today_registrations}}", str(snap.get("today_registrations", 0)))
         .replace("{{total_runtime}}", str(snap.get("total_runtime", "—")))
+        .replace("{{deploy_elapsed}}", str(snap.get("deploy_elapsed", "—")))
+        .replace("{{node_label}}", str(snap.get("node_label", "user")))
     )
 
 
