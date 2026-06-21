@@ -62,9 +62,32 @@ def process_one(email, password, client_id, port, output_dir, tenant, scopes, ti
     try:
         from playwright.sync_api import sync_playwright
         pw = sync_playwright().start()
-        browser = pw.chromium.launch(headless=True)
-        ctx = browser.new_context()
+        browser = pw.chromium.launch(
+            headless=False,
+            args=[
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process',
+            ]
+        )
+        ctx = browser.new_context(
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+            viewport={'width': 1366, 'height': 768},
+            timezone_id='America/New_York',
+            locale='en-US',
+        )
         page = ctx.new_page()
+        # Inject stealth scripts to hide automation
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+            window.chrome = {runtime: {}};
+        """)
         page.goto(auth_url, timeout=25000, wait_until="domcontentloaded")
         time.sleep(2)
 
@@ -79,6 +102,18 @@ def process_one(email, password, client_id, port, output_dir, tenant, scopes, ti
 
         if not pwd:
             result.status = "error"; result.error = "no pwd input"
+            # Debug: capture what page is showing
+            try:
+                url = page.url
+                title = page.title()
+                body_text = page.inner_text("body")[:500] if page.query_selector("body") else "no body"
+                result.error += f" | url={url[:200]} | title={title} | body={body_text[:200]}"
+                page.screenshot(path="/tmp/rt_debug_no_pwd.png", full_page=True)
+                print(f"DEBUG: URL={url}")
+                print(f"DEBUG: Title={title}")
+                print(f"DEBUG: Body preview={body_text[:300]}")
+            except Exception as e:
+                result.error += f" | debug_err={str(e)[:100]}"
             result.elapsed = time.time() - t0; return result
 
         body = page.inner_text("body").lower()
@@ -183,7 +218,13 @@ def load_credentials(input_dir):
             content = open(os.path.join(input_dir, f), "r", encoding="utf-8").read().strip()
         except: continue
         if not content: continue
-        parts = re.split(r"\s*----\s*", content)
+        # Robust parsing: split by 4+ dashes, then filter empty
+        # Try |||| separator first, fallback to ----
+        if "||||" in content:
+            parts = content.split("||||")
+        else:
+            parts = content.rsplit("----", 2)
+        parts = [p.strip() for p in parts if p.strip()]
         if len(parts) < 2: continue
         email = parts[0].strip()
         pwd = parts[1].strip()
@@ -191,6 +232,9 @@ def load_credentials(input_dir):
         rt = parts[3].strip() if len(parts) >= 4 else ""
         if rt and len(rt) > 20: continue
         if "@" not in email: continue
+        # Validate client_id format (should be UUID)
+        if not re.match(r'^[0-9a-f]{8}-', cid):
+            cid = BUILTIN_CLIENT_ID
         creds.append((email, pwd, cid))
     return creds
 

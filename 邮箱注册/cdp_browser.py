@@ -1120,39 +1120,133 @@ class CDPBrowser:
         _thr.Thread(target=_respond, daemon=True).start()
 
     def _hide_automation(self):
-        """Remove automation markers via CDP Runtime.evaluate."""
-        js = """
-        // Remove webdriver flag
+        """Remove automation markers via CDP — persistent across all navigations."""
+        # 核心隐身脚本 — 通过 addScriptToEvaluateOnNewDocument 在每个页面加载前注入
+        stealth_js = r"""
+        // ═══ 1. navigator.webdriver ═══
         Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        // 双重保护：覆盖 prototype
+        delete Navigator.prototype.webdriver;
         
-        // Remove chrome automation info
-        if (window.chrome) {
-            delete window.chrome.csi;
-            delete window.chrome.loadTimes;
-            delete window.chrome.app;
-        }
+        // ═══ 2. Chrome runtime (Microsoft 检测重点) ═══
+        window.chrome = window.chrome || {};
+        window.chrome.runtime = window.chrome.runtime || {
+            connect: function(){},
+            sendMessage: function(){},
+            onConnect: {addListener: function(){}},
+            onMessage: {addListener: function(){}},
+            onDisconnect: {addListener: function(){}},
+            id: undefined,
+        };
+        window.chrome.app = window.chrome.app || {
+            isInstalled: false,
+            InstallState: {DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed'},
+            RunningState: {CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running'},
+            getDetails: function(){return null;},
+            getIsInstalled: function(){return false;},
+        };
+        window.chrome.csi = window.chrome.csi || function(){};
+        window.chrome.loadTimes = window.chrome.loadTimes || function(){};
         
-        // Override permissions query
-        const originalQuery = window.navigator.permissions.query;
+        // ═══ 3. Permissions API ═══
+        const originalQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
         window.navigator.permissions.query = (parameters) => (
             parameters.name === 'notifications' ?
                 Promise.resolve({ state: Notification.permission }) :
                 originalQuery(parameters)
         );
         
-        // Override plugins
+        // ═══ 4. Plugins (真实 Chrome 有 5 个默认插件) ═══
         Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5],
+            get: () => {
+                const plugins = [
+                    {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
+                    {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''},
+                    {name: 'Native Client', filename: 'internal-nacl-plugin', description: ''},
+                ];
+                plugins.length = 3;
+                return plugins;
+            },
+        });
+        Object.defineProperty(navigator, 'mimeTypes', {
+            get: () => [
+                {type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format'},
+                {type: 'application/x-nacl', suffixes: '', description: 'Native Client Executable'},
+            ],
         });
         
-        // Override languages
+        // ═══ 5. Languages ═══
         Object.defineProperty(navigator, 'languages', {
             get: () => ['en-US', 'en'],
         });
+        
+        // ═══ 6. WebGL vendor/renderer (避免暴露虚拟化环境) ═══
+        const getParameterOrig = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(param) {
+            if (param === 37445) return 'Intel Inc.';           // UNMASKED_VENDOR_WEBGL
+            if (param === 37446) return 'Intel Iris OpenGL Engine'; // UNMASKED_RENDERER_WEBGL
+            return getParameterOrig.call(this, param);
+        };
+        if (typeof WebGL2RenderingContext !== 'undefined') {
+            const getParameter2Orig = WebGL2RenderingContext.prototype.getParameter;
+            WebGL2RenderingContext.prototype.getParameter = function(param) {
+                if (param === 37445) return 'Intel Inc.';
+                if (param === 37446) return 'Intel Iris OpenGL Engine';
+                return getParameter2Orig.call(this, param);
+            };
+        }
+        
+        // ═══ 7. Canvas fingerprint 微扰 ═══
+        const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL = function(type) {
+            if (type === 'image/png' || !type) {
+                const ctx = this.getContext('2d');
+                if (ctx) {
+                    const style = ctx.fillStyle;
+                    ctx.fillStyle = 'rgba(255,255,255,0.003)';
+                    ctx.fillRect(0, 0, 1, 1);
+                    ctx.fillStyle = style;
+                }
+            }
+            return origToDataURL.apply(this, arguments);
+        };
+        
+        // ═══ 8. 隐藏自动化特征 ═══
+        // 移除 $cdc_ (ChromeDriver 标记)
+        if (document.querySelector) {
+            const cdc = document.querySelector('[cdc_adoQpoasnfa76pfcZLmcfl_Array]') ||
+                        document.querySelector('[cdc_adoQpoasnfa76pfcZLmcfl_Promise]') ||
+                        document.querySelector('[cdc_adoQpoasnfa76pfcZLmcfl_Symbol]');
+            if (cdc) cdc.remove();
+        }
+        
+        // ═══ 9. Connection API (真实浏览器特征) ═══
+        Object.defineProperty(navigator, 'connection', {
+            get: () => ({
+                rtt: 50,
+                downlink: 10,
+                effectiveType: '4g',
+                saveData: false,
+            }),
+        });
+        
+        // ═══ 10. Hardware concurrency (避免暴露容器环境) ═══
+        Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+        Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+        Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 0});
         """
+        
         try:
-            self._send_cmd("Runtime.evaluate", {"expression": js, "returnByValue": True})
-            logger.info("[CDP] Automation markers hidden")
+            # 关键修复：使用 addScriptToEvaluateOnNewDocument 确保每次页面导航都注入隐身脚本
+            self._send_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_js})
+            logger.info("[CDP] Stealth script injected via addScriptToEvaluateOnNewDocument (persistent)")
+        except Exception as e:
+            logger.warning("[CDP] addScriptToEvaluateOnNewDocument failed: %s, falling back to evaluate", e)
+        
+        # 同时在当前页面立即执行（兼容旧版 Chrome 不支持 addScriptToEvaluateOnNewDocument）
+        try:
+            self._send_cmd("Runtime.evaluate", {"expression": stealth_js, "returnByValue": True})
+            logger.info("[CDP] Automation markers hidden (current page)")
         except Exception as e:
             logger.warning("[CDP] Failed to hide automation: %s", e)
 

@@ -318,26 +318,27 @@ class SubscriptionProxyManager:
             cfg["find-process-mode"] = "off"
             cfg["ipv6"] = False
 
-            # DNS 配置
+            # DNS 配置 — 使用 redir-host 模式（fake-ip 在 gVisor 下不稳定）
             cfg["dns"] = {
                 "enable": True,
                 "listen": "127.0.0.1:53553",
                 "ipv6": False,
-                "enhanced-mode": "fake-ip",
-                "fake-ip-range": "198.18.0.1/16",
-                "default-nameserver": ["223.5.5.5", "119.29.29.29", "8.8.8.8"],
+                "enhanced-mode": "redir-host",
+                "default-nameserver": ["223.5.5.5", "119.29.29.29"],
                 "nameserver": ["https://dns.alidns.com/dns-query", "https://doh.pub/dns-query"],
-                "fallback": ["https://dns.google/dns-query", "https://cloudflare-dns.com/dns-query", "tls://8.8.4.4"],
+                "fallback": ["https://dns.google/dns-query", "https://cloudflare-dns.com/dns-query"],
                 "fallback-filter": {
                     "geoip": True,
                     "geoip-code": "CN",
-                    "ipcidr": ["240.0.0.0/4", "0.0.0.0/32"],
+                    "ipcidr": ["240.0.0.0/4"],
                 },
             }
 
             # 直接下载订阅并提取 proxies（不使用 proxy-providers）
             all_proxies = []
             seen_names = set()
+            # gVisor 环境不支持 UDP，需要过滤纯 UDP 协议
+            UDP_ONLY_TYPES = {"hysteria2", "hysteria", "tuic"}
             for i, sub in enumerate(self._subscriptions):
                 try:
                     url = sub["url"]
@@ -358,7 +359,7 @@ class SubscriptionProxyManager:
                         data = yaml.safe_load(text)
                     except Exception:
                         pass
-                    # 如果不是有效 YAML dict，或 proxies 为空/缺失，尝试 base64 解码（vostuo 等纯文本格式）
+                    # 如果 YAML 解析结果不是 dict 或没有 proxies，尝试 base64 解码
                     need_b64 = False
                     if not isinstance(data, dict):
                         need_b64 = True
@@ -374,6 +375,14 @@ class SubscriptionProxyManager:
                     if isinstance(data, dict) and data.get("proxies"):
                         for p in data["proxies"]:
                             name = p.get("name", "")
+                            ptype = p.get("type", "")
+                            # 过滤纯 UDP 协议（gVisor 不支持）
+                            if ptype in UDP_ONLY_TYPES:
+                                logger.info(f"[mihomo] 跳过 UDP-only 节点: {name} (type={ptype})")
+                                continue
+                            # 强制关闭 UDP（gVisor 内核阻断 UDP 流量）
+                            if p.get("udp"):
+                                p["udp"] = False
                             if name and name not in seen_names:
                                 seen_names.add(name)
                                 all_proxies.append(p)
@@ -415,15 +424,12 @@ class SubscriptionProxyManager:
 
             cfg["proxies"] = all_proxies
 
-            # 构建代理组
+            # 构建代理组 — 使用 select 模式（gVisor 下 url-test 健康检查可能失败）
             node_names = [p["name"] for p in all_proxies]
             cfg["proxy-groups"] = [{
                 "name": "AUTO",
-                "type": "url-test",
+                "type": "select",
                 "proxies": node_names,
-                "url": "http://connect.rom.miui.com/generate_204",
-                "interval": 300,
-                "tolerance": 100,
             }]
 
             cfg["rules"] = ["MATCH,AUTO"]
