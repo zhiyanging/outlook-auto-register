@@ -11,6 +11,7 @@ Outlook 注册常驻守护程序
 
 from __future__ import annotations
 import datetime as dt
+import json
 import logging
 import os
 import subprocess
@@ -38,6 +39,32 @@ logging.basicConfig(
     force=True,
 )
 log = logging.getLogger("outlook_daemon")
+
+ACTIVE_SECONDS_FILE = ROOT / "runtime_outlook" / "active_seconds.json"
+
+
+def _load_active_seconds() -> float:
+    """Load cumulative active seconds from file."""
+    try:
+        if ACTIVE_SECONDS_FILE.exists():
+            return float(json.loads(ACTIVE_SECONDS_FILE.read_text()))
+    except Exception:
+        pass
+    return 0.0
+
+
+def _save_active_seconds(seconds: float):
+    """Save cumulative active seconds to file."""
+    try:
+        ACTIVE_SECONDS_FILE.write_text(str(int(seconds)))
+    except Exception:
+        pass
+
+
+def _increment_active_seconds(delta: float = 30):
+    """Increment the active seconds counter by delta (default 30s per loop)."""
+    current = _load_active_seconds()
+    _save_active_seconds(current + delta)
 
 DISPLAY_ID = ":98"
 REGISTER_COUNT = 5
@@ -194,6 +221,7 @@ def main() -> int:
             log.exception("daemon loop error: %s", exc)
             save_status({"phase": "error", "phase_message": str(exc)[:200]})
             time.sleep(60)
+        _increment_active_seconds(30)
         time.sleep(30)
 
 

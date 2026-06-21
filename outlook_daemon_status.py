@@ -160,15 +160,15 @@ def _registration_stats() -> dict[str, Any]:
     deploy_elapsed = time.time() - DEPLOY_TS
     deploy_str = _fmt_duration(deploy_elapsed)
 
-    # 守护进程实际运行时长（从 PID 文件创建时间算起）
+    # 守护进程真实运行时长（累计活跃秒数，不含宕机时间）
     daemon_uptime_str = "未运行"
-    pid_path = ROOT / "runtime_outlook" / "current.pid"
-    if pid_path.is_file():
+    active_seconds_file = ROOT / "runtime_outlook" / "active_seconds.json"
+    if active_seconds_file.is_file():
         try:
-            pid_mtime = pid_path.stat().st_mtime
-            daemon_elapsed = time.time() - pid_mtime
-            daemon_uptime_str = _fmt_duration(daemon_elapsed)
-        except OSError:
+            active_seconds = float(json.loads(active_seconds_file.read_text()))
+            if active_seconds > 0:
+                daemon_uptime_str = _fmt_duration(active_seconds)
+        except (ValueError, json.JSONDecodeError, OSError):
             pass
 
     return {
