@@ -271,9 +271,10 @@ def os_dismiss_webauthn_dialog(timeout: float = 5.0) -> bool:
         # Title: "Windows Security", "Windows 安全中心", "Windows Hello", etc.
         title_lower = title.lower()
         is_webauthn = (
-            # Known WebAuthn dialog class
-            cls in ("Credential Dialog Xaml Host", "Credential Dialog Xaml Host Window", 
-                    "#32770", "WindowsForms10.Window") or
+            # Known WebAuthn dialog class (expanded list)
+            cls in ("Credential Dialog Xaml Host", "Credential Dialog Xaml Host Window",
+                    "#32770", "WindowsForms10.Window", "Windows Forms",
+                    "Windows.UI.Core.CoreWindow", "ApplicationFrameWindow") or
             # Known dialog titles
             "windows security" in title_lower or
             "windows 安全" in title_lower or
@@ -281,8 +282,14 @@ def os_dismiss_webauthn_dialog(timeout: float = 5.0) -> bool:
             "passkey" in title_lower or
             "通行密钥" in title_lower or
             "security key" in title_lower or
+            "安全密钥" in title_lower or
+            "安全密钥设置" in title_lower or
             "选择保存通行密钥" in title_lower or
-            "保存通行密钥" in title_lower
+            "选择保存密钥" in title_lower or
+            "保存通行密钥" in title_lower or
+            "保存密钥" in title_lower or
+            # 通用匹配: 包含"安全"和"密钥"的弹窗
+            ("安全" in title and "密钥" in title)
         )
         
         # Also check: it must be a dialog/popup, not a main window
@@ -308,53 +315,93 @@ def os_dismiss_webauthn_dialog(timeout: float = 5.0) -> bool:
         user32.EnumWindows(enum_callback, 0)
         
         if found_hwnd:
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 优先策略：点击"取消"按钮（最可靠）
+            # WM_CLOSE/Escape 对某些系统弹窗无效，直接点击按钮最可靠
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             for hwnd in found_hwnd:
-                # Strategy 1: Send WM_CLOSE to the dialog
-                user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
-                logger.info("[OS_INPUT] Sent WM_CLOSE to WebAuthn dialog hwnd=%d", hwnd)
-            
-            time.sleep(0.5)
-            
-            # Check if dialog was closed
-            still_visible = any(user32.IsWindowVisible(h) for h in found_hwnd)
-            if not still_visible:
-                logger.info("[OS_INPUT] WebAuthn dialog dismissed successfully")
-                return True
-            
-            # If still visible, try sending Escape to that specific window
-            for hwnd in found_hwnd:
-                user32.PostMessageW(hwnd, WM_KEYDOWN, VK_ESCAPE, 0)
-                time.sleep(0.05)
-                user32.PostMessageW(hwnd, WM_KEYUP, VK_ESCAPE, 0)
-                logger.info("[OS_INPUT] Sent Escape to WebAuthn dialog hwnd=%d", hwnd)
-            
-            time.sleep(0.5)
-            
-            still_visible = any(user32.IsWindowVisible(h) for h in found_hwnd)
-            if not still_visible:
-                logger.info("[OS_INPUT] WebAuthn dialog dismissed via Escape")
-                return True
-            
-            # Last resort: Tab to "Cancel" button + Enter
-            for hwnd in found_hwnd:
-                # Set foreground and send Tab + Enter
-                user32.SetForegroundWindow(hwnd)
-                time.sleep(0.2)
-            
-            _key_down(0x09)  # VK_TAB
-            time.sleep(0.05)
-            _key_up(0x09)
-            time.sleep(0.2)
-            _key_down(0x0D)  # VK_RETURN
-            time.sleep(0.05)
-            _key_up(0x0D)
-            time.sleep(0.5)
-            
-            still_visible = any(user32.IsWindowVisible(h) for h in found_hwnd)
-            if not still_visible:
-                logger.info("[OS_INPUT] WebAuthn dialog dismissed via Tab+Enter")
-                return True
-            
+                try:
+                    rect = ctypes.wintypes.RECT()
+                    user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                    dialog_w = rect.right - rect.left
+                    dialog_h = rect.bottom - rect.top
+                    logger.info("[OS_INPUT] Dialog rect: (%d,%d) size=%dx%d",
+                               rect.left, rect.top, dialog_w, dialog_h)
+
+                    # ── 先尝试点击右上角 X 关闭按钮 ──
+                    close_x = rect.right - 18  # X 按钮在右上角
+                    close_y = rect.top + 12
+                    logger.info("[OS_INPUT] Clicking X button at (%d, %d)", close_x, close_y)
+                    user32.SetForegroundWindow(hwnd)
+                    time.sleep(0.3)
+                    _move_to(close_x, close_y)
+                    time.sleep(random.uniform(0.05, 0.1))
+                    _mouse_down("left")
+                    time.sleep(random.uniform(0.03, 0.08))
+                    _mouse_up("left")
+                    time.sleep(0.8)
+
+                    if not user32.IsWindowVisible(hwnd):
+                        logger.info("[OS_INPUT] Dialog dismissed via X button")
+                        return True
+
+                    # ── X 无效，点击"取消"按钮 ──
+                    # 根据截图分析：
+                    # - 弹窗宽度 456px 时，"取消"按钮在 x=75% 处
+                    # - 按钮在弹窗底部约 88% 高度处
+                    cancel_x = rect.left + int(dialog_w * 0.75)
+                    cancel_y = rect.top + int(dialog_h * 0.88)
+                    logger.info("[OS_INPUT] Clicking '取消' button at (%d, %d)", cancel_x, cancel_y)
+                    user32.SetForegroundWindow(hwnd)
+                    time.sleep(0.2)
+                    _move_to(cancel_x, cancel_y)
+                    time.sleep(random.uniform(0.05, 0.1))
+                    _mouse_down("left")
+                    time.sleep(random.uniform(0.03, 0.08))
+                    _mouse_up("left")
+                    time.sleep(0.8)
+
+                    if not user32.IsWindowVisible(hwnd):
+                        logger.info("[OS_INPUT] Dialog dismissed via '取消' button")
+                        return True
+
+                    # ── 鼠标点击无效，用键盘方式 ──
+                    # Tab 到"取消"按钮 + Enter
+                    logger.info("[OS_INPUT] Trying Tab+Enter on dialog")
+                    user32.SetForegroundWindow(hwnd)
+                    time.sleep(0.2)
+                    _key_down(0x09)  # VK_TAB
+                    time.sleep(0.05)
+                    _key_up(0x09)
+                    time.sleep(0.1)
+                    _key_down(0x09)  # Tab 两次到取消按钮
+                    time.sleep(0.05)
+                    _key_up(0x09)
+                    time.sleep(0.1)
+                    _key_down(0x0D)  # VK_RETURN
+                    time.sleep(0.05)
+                    _key_up(0x0D)
+                    time.sleep(0.5)
+
+                    if not user32.IsWindowVisible(hwnd):
+                        logger.info("[OS_INPUT] Dialog dismissed via Tab+Enter")
+                        return True
+
+                    # ── 最后尝试 Escape ──
+                    logger.info("[OS_INPUT] Trying Escape key")
+                    user32.PostMessageW(hwnd, WM_KEYDOWN, VK_ESCAPE, 0)
+                    time.sleep(0.05)
+                    user32.PostMessageW(hwnd, WM_KEYUP, VK_ESCAPE, 0)
+                    time.sleep(0.5)
+
+                    if not user32.IsWindowVisible(hwnd):
+                        logger.info("[OS_INPUT] Dialog dismissed via Escape")
+                        return True
+
+                except Exception as e:
+                    logger.warning("[OS_INPUT] Failed to dismiss dialog: %s", e)
+
+            # 所有方法都失败
             logger.warning("[OS_INPUT] WebAuthn dialog still visible after all attempts")
             return False
         

@@ -559,7 +559,6 @@ class CDPBrowser:
             "--disable-software-rasterizer",
             "--disable-dev-shm-usage",
             "--no-sandbox",
-            "--disable-setuid-sandbox",
             "--disable-accelerated-2d-canvas",
             "--disable-accelerated-video-decode",
             "--disable-component-update",

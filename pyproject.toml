@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+# 排除含 sys.exit(1) 等顶层代码的测试文件，避免 pytest 收集阶段崩溃
+# archive/ 和 实验优化版本/ 下的测试为历史脚本，不适合 pytest 直接运行
+addopts = "--ignore=archive --ignore=实验优化版本 --ignore=邮箱注册/archive --ignore=邮箱注册/tests/test_browser_extension.py --ignore=邮箱注册/tests/test_manager.py --ignore=邮箱注册/tests/test_email_outlook.py"

@@ -1,0 +1,5 @@
+updated_at = 1782105766
+
+[local_proxy]
+url = "http://127.0.0.1:7897"
+enabled = true

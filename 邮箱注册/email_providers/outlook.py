@@ -1,3 +1,4 @@
+import json
 import logging
 import random
 import re
@@ -8,6 +9,7 @@ from utils.web_helpers import wait_and_click, set_input_value
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait, Select
@@ -120,23 +122,27 @@ def _xpath_literal(value: str) -> str:
 
 
 def _select_fluent_option(driver: WebDriver, combo_selector: Tuple[str, str], visible_text: str) -> None:
+    """
+    选择 Fluent UI 下拉框选项。
+
+    Fluent UI 使用虚拟滚动，[role=option] 只返回视口内渲染的选项（通常仅 5 个），
+    XPath 文本匹配无法定位不可见的选项。用 type-ahead（键入目标字符）让框架自动滚动。
+    """
     combo = WebDriverWait(driver, WAIT_TIMEOUT).until(EC.presence_of_element_located(combo_selector))
     _js_click(driver, combo)
-    option_xpath = (
-        "//*[not(self::script) and not(self::style) "
-        f"and normalize-space(.)={_xpath_literal(str(visible_text))}]"
-    )
-    option = WebDriverWait(driver, WAIT_TIMEOUT).until(
-        lambda current_driver: next(
-            (
-                element
-                for element in current_driver.find_elements(By.XPATH, option_xpath)
-                if element.is_displayed() and element != combo
-            ),
-            False,
-        )
-    )
-    _js_click(driver, option)
+    time.sleep(0.5)
+
+    # 从目标文本提取数字用于 type-ahead（如 "24日" → "24"，"11月" → "11"）
+    text = str(visible_text)
+    type_chars = ''.join(c for c in text if c.isdigit()) or text.lower()
+
+    logger.debug("[SELECT] fluent type-ahead: '%s' for '%s'", type_chars, visible_text)
+    for ch in type_chars:
+        combo.send_keys(ch)
+        time.sleep(0.06)
+    time.sleep(0.3)
+
+    combo.send_keys(Keys.ENTER)
 
 
 def _click_next(driver: WebDriver) -> None:
@@ -684,8 +690,8 @@ def fill_birthdate_step(driver: WebDriver, country: str, month: str, day: str, y
         select_dropdown_by_index(driver, SELECTORS["birth_day"], int(day))
         set_input_value(driver, SELECTORS["birth_year"], year)
     else:
-        _select_fluent_option(driver, SELECTORS["birth_month_new"], _month_name(month))
-        _select_fluent_option(driver, SELECTORS["birth_day_new"], str(int(day)))
+        _select_fluent_option(driver, SELECTORS["birth_month_new"], f"{int(month)}月")
+        _select_fluent_option(driver, SELECTORS["birth_day_new"], f"{int(day)}日")
         year_input = _first_present(driver, [SELECTORS["birth_year_new"], SELECTORS["birth_year"]])
         _clear_and_type(year_input, year)
 

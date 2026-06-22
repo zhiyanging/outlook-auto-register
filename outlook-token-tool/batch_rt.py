@@ -66,7 +66,6 @@ def process_one(email, password, client_id, port, output_dir, tenant, scopes, ti
             headless=False,
             args=[
                 '--no-sandbox',
-                '--disable-setuid-sandbox',
                 '--disable-blink-features=AutomationControlled',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',

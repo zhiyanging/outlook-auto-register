@@ -309,7 +309,7 @@ POST_CHALLENGE_MARKERS = {
     "account_notice": ["quick note about your microsoft account", "有关 microsoft 帐户的快速说明"],
     "stay_signed_in": ["stay signed in", "保持登录"],
     "add_recovery": ["add a recovery", "recovery email", "添加恢复"],
-    "passkey_prompt": ["passkey", "security key", "windows hello", "通行密钥", "创建通行密钥"],
+    "passkey_prompt": ["passkey", "security key", "windows hello", "通行密钥", "创建通行密钥", "安全密钥设置", "安全密钥"],
     "microsoft_problem": ["we ran into a problem", "something went wrong", "我们遇到了问题"],
     "success": ["account has been created", "帐户已创建"],
 }
@@ -1367,6 +1367,20 @@ def _handle_post_challenge(browser: CDPBrowser, account: OutlookAccount) -> str:
         while _registration_paused or _get_thread_state().get("paused", False):
             time.sleep(0.5)
             if _registration_stop or _get_thread_state().get("stop", False): return "stopped"
+
+        # ── 主动检测系统级 WebAuthn/安全密钥弹窗 ──
+        # 系统弹窗（如"Windows 安全中心 - 安全密钥设置"）不在网页 body 中，
+        # 必须用 Win32 API 主动检测并关闭，否则会阻塞后续流程。
+        if step % 2 == 0:  # 每2步检测一次，避免性能开销
+            try:
+                dismissed = os_dismiss_webauthn_dialog(timeout=1.5)
+                if dismissed:
+                    logger.info("[POST] Step %d: 系统级安全密钥弹窗已关闭", step + 1)
+                    time.sleep(1)
+                    continue  # 弹窗关闭后重新检测页面状态
+            except Exception as e:
+                logger.debug("[POST] 系统弹窗检测异常: %s", e)
+
         state = _detect_page_state(browser)
         logger.info("[POST] Step %d, state: %s", step + 1, state)
         if state == "account_home":
@@ -1498,15 +1512,19 @@ def _handle_post_challenge(browser: CDPBrowser, account: OutlookAccount) -> str:
         if state == "passkey_prompt":
             logger.info("[POST] passkey_prompt detected, dismissing Windows WebAuthn system dialog...")
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # Windows 通行密钥弹窗是系统级弹窗（WebAuthn/Windows Hello），
+            # Windows 通行密钥/安全密钥弹窗是系统级弹窗（WebAuthn/Windows Hello），
             # JS/CDP 完全看不到它。必须用 Win32 API 查找弹窗窗口并发送关闭消息。
-            # 绝对不能盲目发 SendInput 按键，否则会发给 Chrome 导致关闭浏览器！
+            # 弹窗可能延迟出现，需要多次尝试。
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            dismissed = os_dismiss_webauthn_dialog(timeout=5.0)
-            if dismissed:
-                logger.info("[POST] WebAuthn dialog dismissed via Win32 API")
+            for dismiss_attempt in range(3):
+                dismissed = os_dismiss_webauthn_dialog(timeout=4.0)
+                if dismissed:
+                    logger.info("[POST] WebAuthn dialog dismissed via Win32 API (attempt %d)", dismiss_attempt + 1)
+                    break
+                logger.info("[POST] WebAuthn dialog not found yet, retrying... (attempt %d)", dismiss_attempt + 1)
+                time.sleep(1)
             else:
-                logger.warning("[POST] WebAuthn dialog dismiss failed or not found, continuing...")
+                logger.warning("[POST] WebAuthn dialog dismiss failed after 3 attempts, continuing...")
             time.sleep(1)
             # 关闭系统弹窗后，再尝试点击网页上的"下一步"/"跳过"按钮
             clicked = browser.evaluate("""(() => { const btns = document.querySelectorAll('button,a,[role=button],input[type=submit]');
@@ -1946,7 +1964,7 @@ def _fill_birthdate(browser: CDPBrowser, account: OutlookAccount) -> bool:
     
     # Birth day - Fluent UI: click dropdown, then click exact day option
     day_num = int(account.birth_day)
-    _click_fluent_dropdown_option(browser, "#BirthDayDropdown", "BirthDay", [str(day_num)])
+    _click_fluent_dropdown_option(browser, "#BirthDayDropdown", "BirthDay", [f"{day_num}日"])
     time.sleep(random.uniform(0.3, 0.5))
     
     _click_next(browser)
@@ -1955,8 +1973,15 @@ def _fill_birthdate(browser: CDPBrowser, account: OutlookAccount) -> bool:
 
 
 def _click_fluent_dropdown_option(browser: CDPBrowser, button_id: str, name_hint: str, target_texts) -> bool:
-    """Click a Fluent UI Dropdown button and select an option by keyboard navigation."""
-    # Click the dropdown button to open it
+    """
+    选择 Fluent UI 下拉框选项。
+
+    Fluent UI 使用虚拟滚动，[role=option] 只返回视口内渲染的选项（通常仅 5 个），
+    用索引定位靠后的选项（如第 24 天）会失败。
+    策略：打开下拉后键入目标字符（type-ahead），让框架自动滚动并聚焦到匹配项，
+    然后 Enter 确认。
+    """
+    # 点击下拉按钮打开
     nid = browser.query_selector(button_id)
     if not nid:
         nid = browser.query_selector(f"button[name*='{name_hint}']")
@@ -1968,50 +1993,54 @@ def _click_fluent_dropdown_option(browser: CDPBrowser, button_id: str, name_hint
         return False
     browser.click_at(rect["center_x"], rect["center_y"])
     time.sleep(0.8)
-    
-    # Get the list of option texts to find the target index
+
     if isinstance(target_texts, str):
         targets = [target_texts]
     else:
         targets = [str(t) for t in target_texts]
-    result = browser.evaluate(f"""
+
+    # 从目标文本提取数字用于 type-ahead（如 "24日" → "24"）
+    type_chars = ""
+    for t in targets:
+        digits = ''.join(c for c in t if c.isdigit())
+        if digits:
+            type_chars = digits
+            break
+    if not type_chars:
+        type_chars = targets[0].lower() if targets else ""
+
+    # type-ahead：逐字符键入，Fluent UI 自动滚动到匹配项
+    logger.info("[FILL] Type-ahead: '%s' for targets %s", type_chars, targets)
+    for ch in type_chars:
+        browser.press_key(ch)
+        time.sleep(0.08)
+    time.sleep(0.5)  # 等待虚拟滚动完成
+
+    # 验证聚焦项是否匹配目标
+    verify = browser.evaluate(f"""
         (() => {{
             const targets = {json.dumps(targets, ensure_ascii=False)};
-            const options = document.querySelectorAll('[role=option]');
-            const texts = [];
-            let targetIdx = -1;
-            for (let i = 0; i < options.length; i++) {{
-                const t = (options[i].textContent || '').trim();
-                texts.push(t);
-                if (targets.some(x => t === x || t.toLowerCase() === x.toLowerCase())) {{
-                    targetIdx = i;
-                    break;
-                }}
+            const sel = document.querySelector('[role=option][aria-selected="true"]')
+                || document.querySelector('[role=option][data-selected="true"]');
+            if (sel) {{
+                const text = (sel.textContent || '').trim();
+                const match = targets.some(x => text === x || text.toLowerCase() === x.toLowerCase());
+                return JSON.stringify({{found: true, match: match, text: text}});
             }}
-            return JSON.stringify({{texts, targetIdx, count: options.length}});
+            const opts = document.querySelectorAll('[role=option]');
+            const vis = [];
+            for (let i = 0; i < opts.length; i++) vis.push((opts[i].textContent || '').trim());
+            return JSON.stringify({{found: false, visible: vis}});
         }})()
     """)
-    if result:
-        data = json.loads(result)
-        logger.info("[FILL] Options: %s, target index: %d", data["texts"][:5], data["targetIdx"])
-        if data["targetIdx"] >= 0:
-            # Use keyboard: press Home first, then Down arrow to target
-            # First press Home to go to first option
-            browser.press_key("Home")
-            time.sleep(0.1)
-            # Then press Down arrow target_idx times
-            for _ in range(data["targetIdx"]):
-                browser.press_key("ArrowDown")
-                time.sleep(0.05)
-            # Press Enter to select
-            browser.press_key("Enter")
-            logger.info("[FILL] Selected option at index %d", data["targetIdx"])
+    if verify:
+        vdata = json.loads(verify)
+        if vdata.get("found"):
+            logger.info("[FILL] Type-ahead focused '%s', match=%s", vdata.get("text"), vdata.get("match"))
         else:
-            logger.warning("[FILL] Target option '%s' not found in list", targets)
-            browser.press_key("Escape")
-    else:
-        logger.warning("[FILL] Could not read dropdown options")
-        browser.press_key("Escape")
+            logger.info("[FILL] No option focused, visible: %s", vdata.get("visible", [])[:5])
+
+    browser.press_key("Enter")
     time.sleep(0.3)
     return True
 
